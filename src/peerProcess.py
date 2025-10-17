@@ -45,6 +45,8 @@ class Peer:
     send_lock: threading.Lock = field(default_factory=threading.Lock)
     bitfield = bytearray()
     newconnection: bool = True
+    interested: bool = False
+    choked: bool = False
 
     def __post_init__(self):
         self.peerID = int(self.peerID)
@@ -290,18 +292,57 @@ class app:
                 if peer.active:
                     if peer.newconnection:
                         peer.newconnection = False
-                        print("Sending to new connection.")
                         self.sender.send_to_peer(peer, self.make_handshake())
                         self.sender.send_to_peer(peer, self.createMessage(5))
+                    if peer.interested:
+                        #Reset the interest.
+                        #New interest will be determined when we get a have.
+                        #Interest also needs to be recalculated when we receive a full piece.
+                        peer.interested = False
+                        self.sender.send_to_peer(peer, self.createMessage(2))
+                        INFOMESSAGE(f"Interested Message sent to {peer.hostname}")
+                    if not peer.choked:
+                        pass
             time.sleep(.1)
 
     def createMessage(self, type):
         data = b''
+        if type == 0: # Choke
+            length_bytes = bytes([0])
+            msg_id = bytes([0])
+            data = length_bytes + msg_id
+        if type == 1: # Unchoke
+            length_bytes = bytes([0])
+            msg_id = bytes([1])
+            data = length_bytes + msg_id
+        if type == 2: # Interested
+            length_bytes = bytes([0])
+            msg_id = bytes([2])
+            data = length_bytes + msg_id
+        if type == 3: # Not Interested
+            length_bytes = bytes([0])
+            msg_id = bytes([3])
+            data = length_bytes + msg_id
+        if type == 4: # Have
+            length_bytes = bytes([0])
+            msg_id = bytes([4])
+            data = length_bytes + msg_id
         if type == 5:  # bitfield
             length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
             msg_id = bytes([5])
             data = length_bytes + msg_id + self.bitfield
         return data
+    
+    def determineInterest(self, peer:Peer) -> bool:
+        """Return True if peer has at least one piece we don't."""
+        my_bits = self.bitfield
+        their_bits = peer.bitfield
+
+        for i in range(len(my_bits)):
+            # Has bit = 1 where we have 0
+            if (their_bits[i] & ~my_bits[i]) != 0:
+                return True
+        return False  
 
     def readConfig(self, config_path):
         values = []
@@ -364,6 +405,7 @@ class app:
             case 5: #Bitfield
                 payload = msg[5:]
                 peer.bitfield = bytearray(payload)
+                peer.interested = self.determineInterest(peer)
                 INFOMESSAGE(f"Bitfield for Peer {peer.peerID} has been set.")
             case 6: #Request
                 pass
