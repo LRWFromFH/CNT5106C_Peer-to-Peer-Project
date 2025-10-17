@@ -129,12 +129,17 @@ class Receiver:
                     continue
                 length = int.from_bytes(data, byteorder='big')
                 msg_type = self.recv_exact(conn, 1)
+                if not msg_type:
+                    continue
                 data+=msg_type
                 #Get the payload
-                data+=self.recv_exact(conn, length)
+                payload = self.recv_exact(conn, length)
+                if not payload:
+                    continue
+                data+=payload
 
                 # Push data to peer's queue
-                peer_obj.recv_queue.append(data)
+                peer_obj.recv_queue.put(data)
 
         except Exception as e:
             DISCONNECTIONMESSAGE(f"{addr} error: {e}")
@@ -266,10 +271,12 @@ class app:
         INFOMESSAGE(f"Updated bitfield: now have piece {piece_index}.")
 
     def createMessage(self, type):
-        if type == 5:
-            data = len(self.bitfield).to_bytes() + b'5' + self.bitfield
-
-        return data
+        data = b''
+        if type == 5:  # bitfield
+            length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
+            msg_id = bytes([5])
+            data = length_bytes + msg_id + self.bitfield
+            return data
 
     def readConfig(self, config_path):
         values = []
@@ -317,7 +324,7 @@ class app:
 
     def handle_message(self, peer:Peer, msg):
         #This will handle all the different messages based on type.
-        msg_type = int.from_bytes(msg[4])
+        msg_type = msg[4]
         match msg_type:
             case 0: #Choke
                 pass
