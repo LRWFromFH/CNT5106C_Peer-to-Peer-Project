@@ -4,6 +4,8 @@ import random as r
 import sys
 import time
 from dataclasses import dataclass
+from queue import Queue, Empty
+import math
 
 # ----- Constants derived from the project specification -----
 HANDSHAKE_HEADER = b'P2PFILESHARINGPROJ'  # 18 bytes
@@ -30,7 +32,7 @@ import threading
 import socket
 
 @dataclass
-class Peer:  # <peerID> <hostname/IP> <port> <hasFileFlag>
+class Peer:
     peerID: int
     hostname: str
     port: int
@@ -39,6 +41,9 @@ class Peer:  # <peerID> <hostname/IP> <port> <hasFileFlag>
     conn: socket.socket | None = None
     thread: threading.Thread | None = None
     handshake: bool = False
+    recv_queue: Queue = field(default_factory=Queue)
+    send_lock: threading.Lock = field(default_factory=threading.Lock)
+    bitfield = bytearray()
 
     def __post_init__(self):
         self.peerID = int(self.peerID)
@@ -46,9 +51,6 @@ class Peer:  # <peerID> <hostname/IP> <port> <hasFileFlag>
         self.hasFileFlag = bool(int(self.hasFileFlag))
 
 class Receiver:
-
-    server_socket:socket.socket
-
     def __init__(self, server_socket, app_ref):
         self.server_socket = server_socket
         self.app_ref = app_ref  # reference to app (for callbacks)
@@ -71,34 +73,79 @@ class Receiver:
 
         try:
             peer_id = int.from_bytes(peer_id_bytes, byteorder='big')
-            if self.app_ref.peers[peer_id] == peer_id:
-                return True
+            if self.app_ref.peers[peer_id].peerID != peer_id:
+                return False
         except Exception:
             return False
 
         return True
+    
+    def recv_exact(self,conn, length):
+        """Receive exactly `length` bytes or return None if connection closed."""
+        buffer = b''
+        while len(buffer) < length:
+            chunk = conn.recv(length - len(buffer))
+            if not chunk:
+                # Socket closed before full message
+                return None
+            buffer += chunk
+        return buffer
+
 
     def handle_client(self, conn:socket.socket, addr):
         CONNECTIONMESSAGE(f"{addr} connected.")
         current_thread = threading.current_thread()
         connected = True
-        handshakeAttempted = False #Check if handshake has happened.
-        while connected:
-            try:
-                if not handshakeAttempted:
-                    data = conn.recv(HANDSHAKE_LEN)
-                    if data:
-                        if self.validate_handshake(data):
-                            self.app_ref.on_handshake_valid(addr, conn)
-                        else:
-                            DISCONNECTIONMESSAGE(f"{addr} sent invalid handshake.")
-                            conn.close()
-            except Exception as e:
-                DISCONNECTIONMESSAGE(f"{addr} error: {e}")
-            finally:
+        peer_obj: Peer | None = None
+
+        try:
+            # --- First: do handshake ---
+            data = self.recv_exact(conn,HANDSHAKE_LEN)
+            if not self.validate_handshake(data):
+                DISCONNECTIONMESSAGE(f"{addr} sent invalid handshake.")
                 conn.close()
-                if current_thread in self.threads:
-                    self.threads.remove(current_thread)
+                return
+
+            # Identify peer
+            peer_id = int.from_bytes(data[28:32], byteorder='big')
+            if peer_id not in self.app_ref.peers:
+                DISCONNECTIONMESSAGE(f"{addr} peer ID {peer_id} unknown.")
+                conn.close()
+                return
+
+            peer_obj = self.app_ref.peers[peer_id]
+            peer_obj.conn = conn
+            peer_obj.active = True
+            peer_obj.handshake = True
+            peer_obj.thread = current_thread
+
+            # Notify the app
+            INFOMESSAGE(f"Valid handshake from {addr}")
+
+            # --- Now keep reading messages ---
+            while connected and self.running:
+                data = self.recv_exact(conn,4)
+                if not data:
+                    continue
+                length = int.from_bytes(data, byteorder='big')
+                msg_type = self.recv_exact(conn, 1)
+                data+=msg_type
+                #Get the payload
+                data+=self.recv_exact(conn, length)
+
+                # Push data to peer's queue
+                peer_obj.recv_queue.append(data)
+
+        except Exception as e:
+            DISCONNECTIONMESSAGE(f"{addr} error: {e}")
+        finally:
+            if peer_obj:
+                peer_obj.active = False
+                peer_obj.conn = None
+            conn.close()
+            if current_thread in self.threads:
+                self.threads.remove(current_thread)
+            DISCONNECTIONMESSAGE(f"{addr} disconnected.")
 
     def start(self):
         self.server_socket.listen()
@@ -124,6 +171,7 @@ class Receiver:
 class Sender:
     def __init__(self, app_ref):
         self.app_ref = app_ref
+        self.running = True
 
     def connect_to_peer(self, host, port):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -131,14 +179,24 @@ class Sender:
             s.connect((host, port))
             INFOMESSAGE(f"Connected to peer {host}:{port}")
             # Example handshake send
-            s.sendall(HANDSHAKE_HEADER + b'\x00' * HANDSHAKE_ZERO_BITS + b'\x01\x02\x03\x04')
+            s.sendall(self.app_ref.handshake)
+            s.sendall(self.app_ref.createMessage(5))
         except Exception as e:
             DISCONNECTIONMESSAGE(f"Failed to connect to {host}:{port} ({e})")
         finally:
             s.close()
 
+    def send_to_peer(self, peer: Peer, data: bytes):
+        if peer.conn is None:
+            DISCONNECTIONMESSAGE(f"Peer {peer.peerID} not connected")
+            return
+        with peer.send_lock:
+            try:
+                peer.conn.sendall(data)
+            except Exception as e:
+                DISCONNECTIONMESSAGE(f"Failed to send to {peer.peerID}: {e}")
+
 class app:
-    
     "This is going to be the overall app and where data will be passed up to and down from."
     def __init__(self, PEERID):
         self.hostname = socket.gethostbyname(socket.gethostname())
@@ -155,7 +213,7 @@ class app:
         self.update_port("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg", self.peerid, port)
         self.sender = Sender(self)
         self.receiver = Receiver(self.server_socket, self)
-        self.make_handshake()
+        self.handshake = self.make_handshake()
         values = self.readConfig("./Configs/project_config_file_small/project_config_file_small/Common.cfg")
         self.NumberOfPreferredNeighbors = values[0]
         self.UnchokingInterval = values[1]
@@ -163,10 +221,55 @@ class app:
         self.FileName = values[3]
         self.FileSize = values[4]
         self.PieceSize = values[5]
-        Peers = self.getPeersFromFile("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
+        self.originalPeers = self.getPeersFromFile("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
         self.peers: dict[int, Peer] = {
-            p.peerID: p for p in Peers if p.peerID != self.peerid
+            p.peerID: p for p in self.originalPeers
         }
+        self.running = True
+        self.calcBitfield(self.FileName)
+        print(f"Bitfield (len={len(self.bitfield)}):", list(self.bitfield))
+
+    def calcBitfield(self, filename:str):
+        path = "./Configs/project_config_file_small/project_config_file_small/" + str(self.peerid)+"/"+filename
+        
+        total_pieces = math.ceil(int(self.FileSize) / int(self.PieceSize)) #Example: 10000232/32768
+        num_bytes = math.ceil(total_pieces / 8) # 306
+
+        bitfield = bytearray(num_bytes)
+
+        if self.peers[self.peerid].hasFileFlag:
+            for i in range(total_pieces):
+                byte_index = i // 8
+                bit_index = 7 - (i % 8)  # MSB first
+                bitfield[byte_index] |= (1 << bit_index)
+        else:
+            # For now, all zeros
+            pass
+
+        self.bitfield = bytes(bitfield)
+        INFOMESSAGE(f"Generated bitfield for {total_pieces} pieces ({num_bytes} bytes).")
+
+    def updateBitfield(self, piece_index: int):
+        "Update the bitfield by the piece number."
+        byte_index = piece_index // 8
+        bit_index = 7 - (piece_index % 8)  # MSB first
+        
+        # Convert to mutable bytearray
+        bitfield_array = bytearray(self.bitfield)
+        
+        # Set the bit to 1 (mark piece as "have")
+        bitfield_array[byte_index] |= (1 << bit_index)
+        
+        # Save back
+        self.bitfield = bytes(bitfield_array)
+
+        INFOMESSAGE(f"Updated bitfield: now have piece {piece_index}.")
+
+    def createMessage(self, type):
+        if type == 5:
+            data = len(self.bitfield).to_bytes() + b'5' + self.bitfield
+
+        return data
 
     def readConfig(self, config_path):
         values = []
@@ -197,15 +300,69 @@ class app:
                 Peers.append(Peer(parts[0], parts[1], parts[2], parts[3]))
         return Peers
 
-    def peer_management_loop(self):
-        pass
+    def process_incoming_messages(self):
+        """
+        Runs in a separate thread or main loop to process messages.
+        """
+        while self.running:
+            for peer in self.peers.values():
+                if peer.active:
+                    try:
+                        while True:
+                            msg = peer.recv_queue.get_nowait()
+                            self.handle_message(peer, msg)
+                    except Empty:
+                        continue
+            time.sleep(0.01)  # Prevent busy wait
+
+    def handle_message(self, peer:Peer, msg):
+        #This will handle all the different messages based on type.
+        msg_type = int.from_bytes(msg[4])
+        match msg_type:
+            case 0: #Choke
+                pass
+            case 1: #Unchoke
+                pass
+            case 2: #interested
+                pass
+            case 3: #Not interested
+                pass
+            case 4: #Have
+                pass
+            case 5: #Bitfield
+                payload = msg[5:]
+                peer.bitfield = bytearray(payload)
+                INFOMESSAGE(f"Bitfield for Peer {peer.peerID} has been set.")
+            case 6: #Request
+                pass
+            case 7: #Piece
+                pass
+        
+    def connect_to_initial_peers(self):
+        """
+        The first thing a client should do is connected to available peers
+        In this simple case, the available peers are the peers listed above the
+        current app's peer ID in the list
+        """
+        for p in self.originalPeers:
+            #This will loop in order until we hit our own peerid.
+            if p.peerID != self.peerid:
+                self.sender.connect_to_peer(p.hostname, p.port)
+            else:
+                break
+
 
     def check_complete(self):
         pass
 
     def start(self):
         threading.Thread(target=self.receiver.start).start()
-        #threading.Thread(target=self.peer_management_loop, daemon=True).start()
+        threading.Thread(target=self.process_incoming_messages).start()
+        self.connect_to_initial_peers()
+
+    def stop(self):
+        self.running = False
+        self.receiver.stop()
 
     def update_port(self,config_path: str, peer_id: int, new_port: int):
         """
@@ -236,19 +393,12 @@ class app:
             f.write("\n".join(updated_lines) + "\n")
 
         print(f"[INFO] Updated peer {peer_id} to use port {new_port}.")
-
-
-    # CALLBACK from receiver
-    def on_handshake_valid(self, addr, conn):
-        INFOMESSAGE(f"Valid handshake from {addr}")
-        # Example: respond, register peer, or send a file piece request
-        pass
-
+        
     def connect_to_peer(self, host, port):
         self.sender.connect_to_peer(host, port)
 
     def make_handshake(self):
-        return (HANDSHAKE_HEADER + (b'\x00' * HANDSHAKE_ZERO_BITS) + PEERID.to_bytes(4, byteorder='big'))
+        return (HANDSHAKE_HEADER + (b'\x00' * HANDSHAKE_ZERO_BITS) + self.peerid.to_bytes(4, byteorder='big'))
 
 if __name__ == "__main__":
     PEERID = int(sys.argv[1])
