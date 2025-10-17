@@ -44,6 +44,7 @@ class Peer:
     recv_queue: Queue = field(default_factory=Queue)
     send_lock: threading.Lock = field(default_factory=threading.Lock)
     bitfield = bytearray()
+    newconnection: bool = True
 
     def __post_init__(self):
         self.peerID = int(self.peerID)
@@ -114,9 +115,10 @@ class Receiver:
                 return
 
             peer_obj = self.app_ref.peers[peer_id]
-            peer_obj.conn = conn
-            peer_obj.active = True
-            peer_obj.handshake = True
+            if peer_obj.conn is None:
+                peer_obj.conn = conn
+                peer_obj.active = True
+                peer_obj.newconnection = True
             peer_obj.thread = current_thread
 
             # Notify the app
@@ -163,7 +165,7 @@ class Receiver:
                 continue
             #except OSError: #Socket Closed
             #    continue
-            thread = threading.Thread(target=self.handle_client, args=(conn, addr), daemon=True)
+            thread = threading.Thread(target=self.handle_client, args=(conn, addr))
             thread.start()
             self.threads.append(thread)
         INFOMESSAGE("Receiver thread ending. No longer listening for connections.")
@@ -176,20 +178,33 @@ class Receiver:
 class Sender:
     def __init__(self, app_ref):
         self.app_ref = app_ref
+        self.threads = []
         self.running = True
 
-    def connect_to_peer(self, host, port):
+    def stop(self):
+        self.running = False
+        for t in self.threads:
+            t.join(timeout=0.1)
+
+    def connect_to_peer(self, peer: Peer):
+        if peer.conn is not None and peer.active:
+            # Already connected
+            return
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            s.connect((host, port))
-            INFOMESSAGE(f"Connected to peer {host}:{port}")
-            # Example handshake send
-            s.sendall(self.app_ref.handshake)
-            s.sendall(self.app_ref.createMessage(5))
+            s.connect((peer.hostname, peer.port))
+            INFOMESSAGE(f"Connected to peer {peer.hostname}:{peer.port}")
+            peer.conn = s
+            peer.active = True
+            peer.newconnection = True
+            # Start a receiver thread for this connection if needed
+            thread = threading.Thread(target=self.app_ref.receiver.handle_client, args=(s, (peer.hostname, peer.port)))
+            thread.start()
+            peer.thread = thread
         except Exception as e:
-            DISCONNECTIONMESSAGE(f"Failed to connect to {host}:{port} ({e})")
-        finally:
-            s.close()
+            DISCONNECTIONMESSAGE(f"Failed to connect to {peer.hostname}:{peer.port} ({e})")
+            peer.conn = None
+            peer.active = False
 
     def send_to_peer(self, peer: Peer, data: bytes):
         if peer.conn is None:
@@ -232,7 +247,6 @@ class app:
         }
         self.running = True
         self.calcBitfield(self.FileName)
-        print(f"Bitfield (len={len(self.bitfield)}):", list(self.bitfield))
 
     def calcBitfield(self, filename:str):
         path = "./Configs/project_config_file_small/project_config_file_small/" + str(self.peerid)+"/"+filename
@@ -270,13 +284,24 @@ class app:
 
         INFOMESSAGE(f"Updated bitfield: now have piece {piece_index}.")
 
+    def managePeers(self):
+        while self.running:
+            for peer in self.peers.values():
+                if peer.active:
+                    if peer.newconnection:
+                        peer.newconnection = False
+                        print("Sending to new connection.")
+                        self.sender.send_to_peer(peer, self.make_handshake())
+                        self.sender.send_to_peer(peer, self.createMessage(5))
+            time.sleep(.1)
+
     def createMessage(self, type):
         data = b''
         if type == 5:  # bitfield
             length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
             msg_id = bytes([5])
             data = length_bytes + msg_id + self.bitfield
-            return data
+        return data
 
     def readConfig(self, config_path):
         values = []
@@ -354,10 +379,9 @@ class app:
         for p in self.originalPeers:
             #This will loop in order until we hit our own peerid.
             if p.peerID != self.peerid:
-                self.sender.connect_to_peer(p.hostname, p.port)
+                self.sender.connect_to_peer(p)
             else:
                 break
-
 
     def check_complete(self):
         pass
@@ -365,11 +389,13 @@ class app:
     def start(self):
         threading.Thread(target=self.receiver.start).start()
         threading.Thread(target=self.process_incoming_messages).start()
+        threading.Thread(target=self.managePeers).start()
         self.connect_to_initial_peers()
 
     def stop(self):
         self.running = False
         self.receiver.stop()
+        self.sender.stop()
 
     def update_port(self,config_path: str, peer_id: int, new_port: int):
         """
