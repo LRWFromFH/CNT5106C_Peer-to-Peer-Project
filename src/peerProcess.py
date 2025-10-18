@@ -38,9 +38,8 @@ class Peer:
     port: int
     hasFileFlag: bool
     active: bool = False
+    receivedConnection:bool = False
     sending_socket: socket.socket | None = None
-    receiving_socket:socket.socket | None = None
-    thread: threading.Thread | None = None
     handshake: bool = False
     recv_queue: Queue = field(default_factory=Queue)
     send_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -54,12 +53,13 @@ class Peer:
         self.port = int(self.port)
         self.hasFileFlag = bool(int(self.hasFileFlag))
 
-class Receiver:
-    def __init__(self, server_socket, app_ref):
-        self.server_socket = server_socket
+class ConnectionManager:
+    def __init__(self, app_ref):
+        self.server_socket = app_ref.server_socket
         self.app_ref = app_ref  # reference to app (for callbacks)
         self.threads = []
         self.running = True
+        self.connections = {}
 
     def validate_handshake(self, data):
         if len(data) != HANDSHAKE_LEN:
@@ -118,8 +118,6 @@ class Receiver:
                 return
 
             peer_obj = self.app_ref.peers[peer_id]
-            peer_obj.receiving_socket = conn
-            peer_obj.sending_socket = conn
             peer_obj.active = True
             peer_obj.newconnection = True
             peer_obj.thread = current_thread
@@ -151,7 +149,6 @@ class Receiver:
         finally:
             if peer_obj:
                 peer_obj.active = False
-                peer_obj.receiving_socket = None
             conn.close()
             if current_thread in self.threads:
                 self.threads.remove(current_thread)
@@ -164,6 +161,7 @@ class Receiver:
         while self.running:
             try:
                 conn, addr = self.server_socket.accept()
+                self.connections[addr] = conn
             except socket.timeout:
                 continue
             #except OSError: #Socket Closed
@@ -175,17 +173,8 @@ class Receiver:
 
     def stop(self):
         self.running = False
-        for t in self.threads:
-            t.join(timeout=0.1)
-
-class Sender:
-    def __init__(self, app_ref):
-        self.app_ref = app_ref
-        self.threads = []
-        self.running = True
-
-    def stop(self):
-        self.running = False
+        for conn in self.connections:
+            conn.close()
         for t in self.threads:
             t.join(timeout=0.1)
 
@@ -198,12 +187,8 @@ class Sender:
             peer.active = True
             peer.newconnection = True
             # Start a receiver thread for this connection if needed
-            thread = threading.Thread(target=self.app_ref.receiver.handle_client, args=(s, (peer.hostname, peer.port)))
-            thread.start()
-            peer.thread = thread
         except Exception as e:
             DISCONNECTIONMESSAGE(f"Failed to connect to {peer.hostname}:{peer.port} ({e})")
-            peer.sending_socket= None
             peer.active = False
 
     def send_to_peer(self, peer: Peer, data: bytes):
@@ -228,8 +213,7 @@ class app:
                 continue  # Port already in use — try again.
         INFOMESSAGE(f"Server bound on {self.hostname}:{port}")
         self.update_port("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg", self.peerid, port)
-        self.sender = Sender(self)
-        self.receiver = Receiver(self.server_socket, self)
+        self.CM = ConnectionManager(self)
         self.handshake = self.make_handshake()
         values = self.readConfig("./Configs/project_config_file_small/project_config_file_small/Common.cfg")
         self.NumberOfPreferredNeighbors = values[0]
@@ -285,16 +269,18 @@ class app:
         while self.running:
             for peer in self.peers.values():
                 if peer.active:
+                    if peer.receivedConnection:
+                        self.CM.connect_to_peer
                     if peer.newconnection:
                         peer.newconnection = False
-                        self.sender.send_to_peer(peer, self.make_handshake())
-                        self.sender.send_to_peer(peer, self.createMessage(5))
+                        self.CM.send_to_peer(peer, self.make_handshake())
+                        self.CM.send_to_peer(peer, self.createMessage(5))
                     if peer.interested:
                         #Reset the interest.
                         #New interest will be determined when we get a have.
                         #Interest also needs to be recalculated when we receive a full piece.
                         peer.interested = False
-                        self.sender.send_to_peer(peer, self.createMessage(2))
+                        self.CM.send_to_peer(peer, self.createMessage(2))
                         INFOMESSAGE(f"Interested Message sent to {peer.hostname}")
                     if not peer.choked:
                         pass
@@ -416,7 +402,7 @@ class app:
         for p in self.originalPeers:
             #This will loop in order until we hit our own peerid.
             if p.peerID != self.peerid:
-                self.sender.connect_to_peer(p)
+                self.CM.connect_to_peer(p)
             else:
                 break
 
@@ -424,15 +410,14 @@ class app:
         pass
 
     def start(self):
-        threading.Thread(target=self.receiver.start).start()
+        threading.Thread(target=self.CM.start).start()
         threading.Thread(target=self.process_incoming_messages).start()
         threading.Thread(target=self.managePeers).start()
         self.connect_to_initial_peers()
 
     def stop(self):
         self.running = False
-        self.receiver.stop()
-        self.sender.stop()
+        self.CM.stop()
 
     def update_port(self,config_path: str, peer_id: int, new_port: int):
         """
@@ -464,8 +449,8 @@ class app:
 
         print(f"[INFO] Updated peer {peer_id} to use port {new_port}.")
         
-    def connect_to_peer(self, host, port):
-        self.sender.connect_to_peer(host, port)
+    def connect_to_peer(self, peer:Peer):
+        self.CM.connect_to_peer(peer)
 
     def make_handshake(self):
         return (HANDSHAKE_HEADER + (b'\x00' * HANDSHAKE_ZERO_BITS) + self.peerid.to_bytes(4, byteorder='big'))
