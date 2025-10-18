@@ -73,7 +73,7 @@ def main():
     args = parser.parse_args()
 
     # Give each process its own port
-    base_port = 5050
+    base_port = 6001
     my_port = base_port + args.id
     manager = ConnectionManager(LOCAL_IP, my_port)
 
