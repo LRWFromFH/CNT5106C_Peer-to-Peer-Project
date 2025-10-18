@@ -38,7 +38,8 @@ class Peer:
     port: int
     hasFileFlag: bool
     active: bool = False
-    conn: socket.socket | None = None
+    sending_socket: socket.socket | None = None
+    receiving_socket:socket.socket | None = None
     thread: threading.Thread | None = None
     handshake: bool = False
     recv_queue: Queue = field(default_factory=Queue)
@@ -117,10 +118,10 @@ class Receiver:
                 return
 
             peer_obj = self.app_ref.peers[peer_id]
-            if peer_obj.conn is None:
-                peer_obj.conn = conn
-                peer_obj.active = True
-                peer_obj.newconnection = True
+            peer_obj.receiving_socket = conn
+            peer_obj.sending_socket = conn
+            peer_obj.active = True
+            peer_obj.newconnection = True
             peer_obj.thread = current_thread
 
             # Notify the app
@@ -150,7 +151,7 @@ class Receiver:
         finally:
             if peer_obj:
                 peer_obj.active = False
-                peer_obj.conn = None
+                peer_obj.receiving_socket = None
             conn.close()
             if current_thread in self.threads:
                 self.threads.remove(current_thread)
@@ -189,14 +190,11 @@ class Sender:
             t.join(timeout=0.1)
 
     def connect_to_peer(self, peer: Peer):
-        if peer.conn is not None and peer.active:
-            # Already connected
-            return
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             s.connect((peer.hostname, peer.port))
             INFOMESSAGE(f"Connected to peer {peer.hostname}:{peer.port}")
-            peer.conn = s
+            peer.sending_socket = s
             peer.active = True
             peer.newconnection = True
             # Start a receiver thread for this connection if needed
@@ -205,16 +203,13 @@ class Sender:
             peer.thread = thread
         except Exception as e:
             DISCONNECTIONMESSAGE(f"Failed to connect to {peer.hostname}:{peer.port} ({e})")
-            peer.conn = None
+            peer.sending_socket= None
             peer.active = False
 
     def send_to_peer(self, peer: Peer, data: bytes):
-        if peer.conn is None:
-            DISCONNECTIONMESSAGE(f"Peer {peer.peerID} not connected")
-            return
         with peer.send_lock:
             try:
-                peer.conn.sendall(data)
+                peer.sending_socket.sendall(data)
             except Exception as e:
                 DISCONNECTIONMESSAGE(f"Failed to send to {peer.peerID}: {e}")
 
