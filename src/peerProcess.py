@@ -44,7 +44,7 @@ class Peer:
     recv_queue: Queue = field(default_factory=Queue)
     send_lock: threading.Lock = field(default_factory=threading.Lock)
     bitfield = bytearray()
-    newconnection: bool = True
+    newconnection: bool = False
     interested: bool = False
     choked: bool = False
 
@@ -59,30 +59,35 @@ class ConnectionManager:
         self.app_ref = app_ref  # reference to app (for callbacks)
         self.threads = []
         self.running = True
-        self.connections = {}
 
     def validate_handshake(self, data):
+        valid = True
         if len(data) != HANDSHAKE_LEN:
-            return False
+            valid = False
+            #INFOMESSAGE("Invalid length.")
     
         header = data[:18]
         zero_bits = data[18:28]
         peer_id_bytes = data[28:32]
 
         if header != HANDSHAKE_HEADER:
-            return False
+            valid = False
+            #INFOMESSAGE("Invalid Header Bits.")
         
         if zero_bits != (b'\x00' * 10):
-            return False
-
-        try:
+            valid = False
+            #INFOMESSAGE("Invalid Zero Bits.")
+        
+        if valid:
             peer_id = int.from_bytes(peer_id_bytes, byteorder='big')
-            if self.app_ref.peers[peer_id].peerID != peer_id:
-                return False
-        except Exception:
-            return False
+            for p in self.app_ref.peers:
+                if peer_id != p.peerID:
+                    valid = False
+                else:
+                    valid = True
+                    break
 
-        return True
+        return valid
     
     def recv_exact(self,conn, length):
         """Receive exactly `length` bytes or return None if connection closed."""
@@ -111,17 +116,23 @@ class ConnectionManager:
                 return
 
             # Identify peer
+            identified = False
             peer_id = int.from_bytes(data[28:32], byteorder='big')
-            if peer_id not in self.app_ref.peers:
+            for p in self.app_ref.peers:
+                if p.peerID == peer_id:
+                    identified = True
+                    peer_obj = p
+                    peer_obj.active = True
+                    peer_obj.receivedConnection = True
+                    peer_obj.newconnection = True
+                    peer_obj.thread = current_thread
+                    break
+                
+            if not identified:
                 DISCONNECTIONMESSAGE(f"{addr} peer ID {peer_id} unknown.")
                 conn.close()
                 return
-
-            peer_obj = self.app_ref.peers[peer_id]
-            peer_obj.active = True
-            peer_obj.newconnection = True
-            peer_obj.thread = current_thread
-
+            
             # Notify the app
             INFOMESSAGE(f"Valid handshake from {addr}")
 
@@ -161,7 +172,6 @@ class ConnectionManager:
         while self.running:
             try:
                 conn, addr = self.server_socket.accept()
-                self.connections[addr] = conn
             except socket.timeout:
                 continue
             #except OSError: #Socket Closed
@@ -173,15 +183,13 @@ class ConnectionManager:
 
     def stop(self):
         self.running = False
-        for conn in self.connections:
-            conn.close()
         for t in self.threads:
             t.join(timeout=0.1)
 
     def connect_to_peer(self, peer: Peer):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            s.connect((peer.hostname, peer.port))
+            s.connect((peer.hostname, int(peer.port)))
             INFOMESSAGE(f"Connected to peer {peer.hostname}:{peer.port}")
             peer.sending_socket = s
             peer.active = True
@@ -193,10 +201,20 @@ class ConnectionManager:
 
     def send_to_peer(self, peer: Peer, data: bytes):
         with peer.send_lock:
+            if not peer.sending_socket:
+                DISCONNECTIONMESSAGE(f"Peer {peer.peerID} has no socket to send to.")
+                return
             try:
                 peer.sending_socket.sendall(data)
             except Exception as e:
                 DISCONNECTIONMESSAGE(f"Failed to send to {peer.peerID}: {e}")
+                peer.active = False
+                try:
+                    peer.sending_socket.close()
+                except:
+                    pass
+                peer.sending_socket = None
+
 
 class app:
     "This is going to be the overall app and where data will be passed up to and down from."
@@ -214,7 +232,6 @@ class app:
         INFOMESSAGE(f"Server bound on {self.hostname}:{port}")
         self.update_port("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg", self.peerid, port)
         self.CM = ConnectionManager(self)
-        self.handshake = self.make_handshake()
         values = self.readConfig("./Configs/project_config_file_small/project_config_file_small/Common.cfg")
         self.NumberOfPreferredNeighbors = values[0]
         self.UnchokingInterval = values[1]
@@ -222,10 +239,7 @@ class app:
         self.FileName = values[3]
         self.FileSize = values[4]
         self.PieceSize = values[5]
-        self.originalPeers = self.getPeersFromFile("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
-        self.peers: dict[int, Peer] = {
-            p.peerID: p for p in self.originalPeers
-        }
+        self.peers = self.getPeersFromFile("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
         self.running = True
         self.calcBitfield(self.FileName)
 
@@ -237,7 +251,13 @@ class app:
 
         bitfield = bytearray(num_bytes)
 
-        if self.peers[self.peerid].hasFileFlag:
+        hasFileFlag = False
+        for p in self.peers:
+            if p.peerID == self.peerid:
+                if p.hasFileFlag:
+                    hasFileFlag = True
+
+        if hasFileFlag:
             for i in range(total_pieces):
                 byte_index = i // 8
                 bit_index = 7 - (i % 8)  # MSB first
@@ -267,12 +287,19 @@ class app:
 
     def managePeers(self):
         while self.running:
-            for peer in self.peers.values():
+            for peer in self.peers:
+                if peer.receivedConnection:
+                        peer.receivedConnection = False
+                        #This has to be done to make sure that the port is correct
+                        #The port could be the last randomly picked one from the
+                        #Last time the program ran, so we need to check before
+                        #Connecting.
+                        self.updatePeerPorts(self.peers, "./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
+                        self.connect_to_peer(peer)
                 if peer.active:
-                    if peer.receivedConnection:
-                        self.CM.connect_to_peer
                     if peer.newconnection:
                         peer.newconnection = False
+                        print(self.make_handshake())
                         self.CM.send_to_peer(peer, self.make_handshake())
                         self.CM.send_to_peer(peer, self.createMessage(5))
                     if peer.interested:
@@ -340,6 +367,20 @@ class app:
                 #FileSize 2167705
                 #PieceSize 16384
         return values
+    
+    def updatePeerPorts(self, Peers:list[Peer], peer_path:str):
+        ports = []
+        with open(peer_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if not parts:
+                    #This will add ourselves to the list of peers, but we will use that
+                    #to determine the active peers before we started.
+                    continue
+                #<peerID> <hostname/IP> <port> <hasFileFlag>
+                ports.append(parts[2])
+        for i in range(len(Peers)):
+            Peers[i].port = ports[i]
 
     def getPeersFromFile(self, peer_path:str):
         Peers = []
@@ -359,7 +400,7 @@ class app:
         Runs in a separate thread or main loop to process messages.
         """
         while self.running:
-            for peer in self.peers.values():
+            for peer in self.peers:
                 if peer.active:
                     try:
                         while True:
@@ -399,7 +440,7 @@ class app:
         In this simple case, the available peers are the peers listed above the
         current app's peer ID in the list
         """
-        for p in self.originalPeers:
+        for p in self.peers:
             #This will loop in order until we hit our own peerid.
             if p.peerID != self.peerid:
                 self.CM.connect_to_peer(p)
