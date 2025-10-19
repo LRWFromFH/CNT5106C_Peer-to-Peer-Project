@@ -285,6 +285,8 @@ class app:
 
         INFOMESSAGE(f"Updated bitfield: now have piece {piece_index}.")
 
+    ## TODO: Change this to a process manager.
+    ## The process will instead use a thread safe queue to tasks based on messages received.
     def managePeers(self):
         while self.running:
             for peer in self.peers:
@@ -432,6 +434,8 @@ class app:
             case 6: #Request
                 pass
             case 7: #Piece
+                pass
+            case -1:#Received handshake
                 pass
         
     def connect_to_initial_peers(self):
