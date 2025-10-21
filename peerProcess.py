@@ -503,6 +503,7 @@ class app:
                 # Check if this line matches the peer ID
                 if parts[0] == str(peer_id):
                     # Replace the port (3rd value)
+                    parts[1] = self.hostname
                     parts[2] = str(new_port)
                     updated_line = " ".join(parts)
                 else:
