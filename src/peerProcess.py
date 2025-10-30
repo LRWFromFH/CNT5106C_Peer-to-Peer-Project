@@ -115,8 +115,7 @@ class ConnectionManager:
 
         buffer = b''
         conn.settimeout(0.5)  # temporary timeout
-        if length == 0:
-            return None
+
         while len(buffer) < length and self.running:
             try:
                 chunk = conn.recv(length - len(buffer))
@@ -176,11 +175,14 @@ class ConnectionManager:
                 if not msg_type:
                     continue
                 #Get the payload
-                payload = self.recv_exact(conn, length)
+                if length != 0:
+                    payload = self.recv_exact(conn, length)
+                else:
+                    payload = None
                 
                 # Push data to peer's queue
                 #peer_obj.recv_queue.put(data)
-                self.app_ref.messageQueue.put((peer_obj,msg_type, payload))
+                self.app_ref.messageQueue.put((peer_obj, msg_type, payload))
 
         except Exception as e:
             DISCONNECTIONMESSAGE(f"{addr} error: {e}")
@@ -350,8 +352,12 @@ class app:
                     #We have received a bitfield from and need to simply determine interest in the sender's pieces.
                     #The bitfield has already been set for the peer.
                     case Messages.BITFIELD:
+                        print(f"Result of interest check: {self.determineInterest(peer)}")
                         if self.determineInterest(peer):
                             self.CM.send_to_peer(peer, self.createMessage(Messages.INTERESTED))
+                    #Whatever we want to do when we receive an interested message.
+                    case Messages.INTERESTED:
+                        INFOMESSAGE(f"Received interested message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case _:
                         print(peer, msg_type)
 
@@ -388,23 +394,24 @@ class app:
         data = b''
         match type:
             case Messages.CHOKE:
-                length_bytes = bytes([0])
+                length_bytes = (0).to_bytes(4, byteorder='big')
                 msg_id = bytes([0])
                 data = length_bytes + msg_id
             case Messages.UNCHOKE: # Unchoke
-                length_bytes = bytes([0])
+                length_bytes = (0).to_bytes(4, byteorder='big')
                 msg_id = bytes([1])
                 data = length_bytes + msg_id
             case Messages.INTERESTED: # Interested
-                length_bytes = bytes([0])
+                length_bytes = (0).to_bytes(4, byteorder='big')
                 msg_id = bytes([2])
                 data = length_bytes + msg_id
             case Messages.NOT_INTERESTED: # Not Interested
-                length_bytes = bytes([0])
+                length_bytes = (0).to_bytes(4, byteorder='big')
                 msg_id = bytes([3])
                 data = length_bytes + msg_id
             case Messages.HAVE: # Have
-                length_bytes = bytes([0])
+                #TODO: Implement correct version of HAVE
+                length_bytes = (0).to_bytes(4, byteorder='big')
                 msg_id = bytes([4])
                 data = length_bytes + msg_id
             case Messages.BITFIELD:  # bitfield
@@ -489,7 +496,8 @@ class app:
             case Messages.UNCHOKE: #Unchoke
                 pass
             case Messages.INTERESTED: #interested
-                pass
+                INFOMESSAGE("INTEREST MESSAGE RECEIVED")
+                self.dispatchQueue.put((peer, Messages.INTERESTED))
             case Messages.NOT_INTERESTED: #Not interested
                 pass
             case Messages.HAVE: #Have
