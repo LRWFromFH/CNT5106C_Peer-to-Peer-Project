@@ -1,11 +1,13 @@
+from email.policy import default
 import threading
 import socket
 import random as r
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from queue import Queue, Empty
 import math
+from enum import Enum
 
 # ----- Constants derived from the project specification -----
 HANDSHAKE_HEADER = b'P2PFILESHARINGPROJ'  # 18 bytes
@@ -27,9 +29,28 @@ def DISCONNECTIONMESSAGE(text:str) -> None:
     "Prints information about connections to terminal."
     print(f"[DISCONNECTION] {text}")
 
-from dataclasses import dataclass, field
-import threading
-import socket
+class Messages(Enum):
+    CHOKE           = 0
+    UNCHOKE         = 1
+    INTERESTED      = 2
+    NOT_INTERESTED  = 3
+    HAVE            = 4
+    BITFIELD        = 5
+    REQUEST         = 6
+    PIECE           = 7
+    HANDSHAKE       = -1
+    CONNECT_TO      = -2
+
+    @staticmethod
+    def get_type(m_type:str):
+        try:
+            m_type = int(m_type)
+            for m in Messages:
+                if m.value == m_type:
+                    return m
+            return None
+        except Exception as e:
+            print(f"Error: {e}")
 
 @dataclass
 class Peer:
@@ -37,16 +58,15 @@ class Peer:
     hostname: str
     port: int
     hasFileFlag: bool
-    active: bool = False
-    receivedConnection:bool = False
     sending_socket: socket.socket | None = None
-    handshake: bool = False
     recv_queue: Queue = field(default_factory=Queue)
     send_lock: threading.Lock = field(default_factory=threading.Lock)
+    thread: threading.Thread | None = None
     bitfield = bytearray()
     newconnection: bool = False
     interested: bool = False
     choked: bool = False
+    connected:bool = False
 
     def __post_init__(self):
         self.peerID = int(self.peerID)
@@ -54,7 +74,7 @@ class Peer:
         self.hasFileFlag = bool(int(self.hasFileFlag))
 
 class ConnectionManager:
-    def __init__(self, app_ref):
+    def __init__(self, app_ref:"app"):
         self.server_socket = app_ref.server_socket
         self.app_ref = app_ref  # reference to app (for callbacks)
         self.threads = []
@@ -91,20 +111,31 @@ class ConnectionManager:
     
     def recv_exact(self,conn, length):
         """Receive exactly `length` bytes or return None if connection closed."""
+        old_timeout = conn.gettimeout()
+
         buffer = b''
-        while len(buffer) < length:
-            chunk = conn.recv(length - len(buffer))
-            if not chunk:
-                # Socket closed before full message
+        conn.settimeout(0.5)  # temporary timeout
+        if length == 0:
+            return None
+        while len(buffer) < length and self.running:
+            try:
+                chunk = conn.recv(length - len(buffer))
+                if not chunk:
+                    # Socket closed before full message
+                    return None
+                buffer += chunk
+            except socket.timeout:
+                continue  # check running flag
+            except OSError:
                 return None
-            buffer += chunk
-        return buffer
+
+        conn.settimeout(old_timeout)
+        return buffer if self.running else None
 
 
     def handle_client(self, conn:socket.socket, addr):
         CONNECTIONMESSAGE(f"{addr} connected.")
         current_thread = threading.current_thread()
-        connected = True
         peer_obj: Peer | None = None
 
         try:
@@ -122,44 +153,38 @@ class ConnectionManager:
                 if p.peerID == peer_id:
                     identified = True
                     peer_obj = p
-                    peer_obj.active = True
-                    peer_obj.receivedConnection = True
-                    peer_obj.newconnection = True
                     peer_obj.thread = current_thread
                     break
                 
             if not identified:
-                DISCONNECTIONMESSAGE(f"{addr} peer ID {peer_id} unknown.")
+                #raise Exception(f"{addr} peer ID {peer_id} unknown.")
                 conn.close()
                 return
             
             # Notify the app
             INFOMESSAGE(f"Valid handshake from {addr}")
+            peer_obj.connected = True
+            self.app_ref.messageQueue.put((peer_obj, Messages.HANDSHAKE, None))
 
             # --- Now keep reading messages ---
-            while connected and self.running:
+            while self.running and peer_obj.connected:
                 data = self.recv_exact(conn,4)
                 if not data:
                     continue
                 length = int.from_bytes(data, byteorder='big')
-                msg_type = self.recv_exact(conn, 1)
+                msg_type = Messages.get_type(int.from_bytes(self.recv_exact(conn, 1),byteorder='big'))
                 if not msg_type:
                     continue
-                data+=msg_type
                 #Get the payload
                 payload = self.recv_exact(conn, length)
-                if not payload:
-                    continue
-                data+=payload
-
+                
                 # Push data to peer's queue
-                peer_obj.recv_queue.put(data)
+                #peer_obj.recv_queue.put(data)
+                self.app_ref.messageQueue.put((peer_obj,msg_type, payload))
 
         except Exception as e:
             DISCONNECTIONMESSAGE(f"{addr} error: {e}")
         finally:
-            if peer_obj:
-                peer_obj.active = False
             conn.close()
             if current_thread in self.threads:
                 self.threads.remove(current_thread)
@@ -186,18 +211,27 @@ class ConnectionManager:
         for t in self.threads:
             t.join(timeout=0.1)
 
+    def stop_thread(self, peer:Peer):
+        for t in self.threads:
+            if t == peer.thread:
+                t.join(timeout=0.1)
+        
+    def disconnect_from_peer(self, peer:Peer):
+        try:
+            peer.sending_socket.close()
+            self.stop_thread(peer)
+        except:
+            INFOMESSAGE(f"Could not close connections with peer {peer.peerID} on {peer.hostname}:{peer.port}")
+
     def connect_to_peer(self, peer: Peer):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             s.connect((peer.hostname, int(peer.port)))
             INFOMESSAGE(f"Connected to peer {peer.hostname}:{peer.port}")
             peer.sending_socket = s
-            peer.active = True
-            peer.newconnection = True
             # Start a receiver thread for this connection if needed
         except Exception as e:
             DISCONNECTIONMESSAGE(f"Failed to connect to {peer.hostname}:{peer.port} ({e})")
-            peer.active = False
 
     def send_to_peer(self, peer: Peer, data: bytes):
         with peer.send_lock:
@@ -208,7 +242,6 @@ class ConnectionManager:
                 peer.sending_socket.sendall(data)
             except Exception as e:
                 DISCONNECTIONMESSAGE(f"Failed to send to {peer.peerID}: {e}")
-                peer.active = False
                 try:
                     peer.sending_socket.close()
                 except:
@@ -242,6 +275,8 @@ class app:
         self.peers = self.getPeersFromFile("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
         self.running = True
         self.calcBitfield(self.FileName)
+        self.messageQueue = Queue()
+        self.dispatchQueue = Queue()
 
     def calcBitfield(self, filename:str):
         path = "./Configs/project_config_file_small/project_config_file_small/" + str(self.peerid)+"/"+filename
@@ -289,58 +324,93 @@ class app:
     ## The process will instead use a thread safe queue to tasks based on messages received.
     def managePeers(self):
         while self.running:
-            for peer in self.peers:
-                if peer.receivedConnection:
-                        peer.receivedConnection = False
-                        #This has to be done to make sure that the port is correct
-                        #The port could be the last randomly picked one from the
-                        #Last time the program ran, so we need to check before
-                        #Connecting.
+            try:
+                peer:Peer
+                msg_type:Messages
+                peer, msg_type = self.dispatchQueue.get_nowait()
+
+                match msg_type:
+                    #We have to connect to
+                    case Messages.CONNECT_TO:
                         self.updatePeerPorts(self.peers, "./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
-                        self.connect_to_peer(peer)
-                if peer.active:
-                    if peer.newconnection:
-                        peer.newconnection = False
-                        print(self.make_handshake())
+                        INFOMESSAGE(f"Connecting to peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        self.CM.connect_to_peer(peer)
                         self.CM.send_to_peer(peer, self.make_handshake())
-                        self.CM.send_to_peer(peer, self.createMessage(5))
-                    if peer.interested:
-                        #Reset the interest.
-                        #New interest will be determined when we get a have.
-                        #Interest also needs to be recalculated when we receive a full piece.
-                        peer.interested = False
-                        self.CM.send_to_peer(peer, self.createMessage(2))
-                        INFOMESSAGE(f"Interested Message sent to {peer.hostname}")
-                    if not peer.choked:
-                        pass
+                        self.CM.send_to_peer(peer, self.createMessage(Messages.BITFIELD))
+                    #This means that we have received a handshake from the peer.
+                    #We do not necessarily have to return the handshake
+                    case Messages.HANDSHAKE:
+                        #Connect to the peer and return a handshake and bitfield if we do NOT already have a sending socket for the peer.
+                        if not peer.sending_socket:
+                            self.updatePeerPorts(self.peers, "./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
+                            self.CM.connect_to_peer(peer)
+                            self.CM.send_to_peer(peer, self.make_handshake())
+                            self.CM.send_to_peer(peer, self.createMessage(Messages.BITFIELD))
+                        #If we receive a handshake, but already have a connection to them, then we can safely ignore it.
+                    #We have received a bitfield from and need to simply determine interest in the sender's pieces.
+                    #The bitfield has already been set for the peer.
+                    case Messages.BITFIELD:
+                        if self.determineInterest(peer):
+                            self.CM.send_to_peer(peer, self.createMessage(Messages.INTERESTED))
+                    case _:
+                        print(peer, msg_type)
+
+            except Empty:
+                continue
+
+            #for peer in self.peers:
+            #    if peer.receivedConnection:
+            #            peer.receivedConnection = False
+            #            #This has to be done to make sure that the port is correct
+            #            #The port could be the last randomly picked one from the
+            #            #Last time the program ran, so we need to check before
+            #            #Connecting.
+            #            self.updatePeerPorts(self.peers, "./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
+            #            self.connect_to_peer(peer)
+            #    if peer.active:
+            #        if peer.newconnection:
+            #            peer.newconnection = False
+            #            print(self.make_handshake())
+            #            self.CM.send_to_peer(peer, self.make_handshake())
+            #            self.CM.send_to_peer(peer, self.createMessage(5))
+            #        if peer.interested:
+            #            #Reset the interest.
+            #            #New interest will be determined when we get a have.
+            #            #Interest also needs to be recalculated when we receive a full piece.
+            #            peer.interested = False
+            #            self.CM.send_to_peer(peer, self.createMessage(2))
+            #            INFOMESSAGE(f"Interested Message sent to {peer.hostname}")
+            #        if not peer.choked:
+            #            pass
             time.sleep(.1)
 
-    def createMessage(self, type):
+    def createMessage(self, type:Messages):
         data = b''
-        if type == 0: # Choke
-            length_bytes = bytes([0])
-            msg_id = bytes([0])
-            data = length_bytes + msg_id
-        if type == 1: # Unchoke
-            length_bytes = bytes([0])
-            msg_id = bytes([1])
-            data = length_bytes + msg_id
-        if type == 2: # Interested
-            length_bytes = bytes([0])
-            msg_id = bytes([2])
-            data = length_bytes + msg_id
-        if type == 3: # Not Interested
-            length_bytes = bytes([0])
-            msg_id = bytes([3])
-            data = length_bytes + msg_id
-        if type == 4: # Have
-            length_bytes = bytes([0])
-            msg_id = bytes([4])
-            data = length_bytes + msg_id
-        if type == 5:  # bitfield
-            length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
-            msg_id = bytes([5])
-            data = length_bytes + msg_id + self.bitfield
+        match type:
+            case Messages.CHOKE:
+                length_bytes = bytes([0])
+                msg_id = bytes([0])
+                data = length_bytes + msg_id
+            case Messages.UNCHOKE: # Unchoke
+                length_bytes = bytes([0])
+                msg_id = bytes([1])
+                data = length_bytes + msg_id
+            case Messages.INTERESTED: # Interested
+                length_bytes = bytes([0])
+                msg_id = bytes([2])
+                data = length_bytes + msg_id
+            case Messages.NOT_INTERESTED: # Not Interested
+                length_bytes = bytes([0])
+                msg_id = bytes([3])
+                data = length_bytes + msg_id
+            case Messages.HAVE: # Have
+                length_bytes = bytes([0])
+                msg_id = bytes([4])
+                data = length_bytes + msg_id
+            case Messages.BITFIELD:  # bitfield
+                length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
+                msg_id = bytes([5])
+                data = length_bytes + msg_id + self.bitfield
         return data
     
     def determineInterest(self, peer:Peer) -> bool:
@@ -402,41 +472,40 @@ class app:
         Runs in a separate thread or main loop to process messages.
         """
         while self.running:
-            for peer in self.peers:
-                if peer.active:
-                    try:
-                        while True:
-                            msg = peer.recv_queue.get_nowait()
-                            self.handle_message(peer, msg)
-                    except Empty:
-                        continue
+            try:
+                msg = self.messageQueue.get_nowait()
+                self.handle_message(msg)
+            except Empty:
+                continue
             time.sleep(0.01)  # Prevent busy wait
 
-    def handle_message(self, peer:Peer, msg):
+    def handle_message(self, info):
         #This will handle all the different messages based on type.
-        msg_type = msg[4]
+        peer, msg_type, payload = info
+
         match msg_type:
-            case 0: #Choke
+            case Messages.CHOKE:
                 pass
-            case 1: #Unchoke
+            case Messages.UNCHOKE: #Unchoke
                 pass
-            case 2: #interested
+            case Messages.INTERESTED: #interested
                 pass
-            case 3: #Not interested
+            case Messages.NOT_INTERESTED: #Not interested
                 pass
-            case 4: #Have
+            case Messages.HAVE: #Have
                 pass
-            case 5: #Bitfield
-                payload = msg[5:]
+            case Messages.BITFIELD: #Bitfield
                 peer.bitfield = bytearray(payload)
-                peer.interested = self.determineInterest(peer)
+                self.dispatchQueue.put((peer,Messages.BITFIELD))
+                #peer.interested = self.determineInterest(peer)
                 INFOMESSAGE(f"Bitfield for Peer {peer.peerID} has been set.")
-            case 6: #Request
+            case Messages.REQUEST: #Request
                 pass
-            case 7: #Piece
+            case Messages.PIECE: #Piece
                 pass
-            case -1:#Received handshake
-                pass
+            case Messages.HANDSHAKE:#Received handshake
+                INFOMESSAGE(f"HANDSHAKE RECEIVED.")
+                self.dispatchQueue.put((peer,Messages.HANDSHAKE))
         
     def connect_to_initial_peers(self):
         """
@@ -447,7 +516,7 @@ class app:
         for p in self.peers:
             #This will loop in order until we hit our own peerid.
             if p.peerID != self.peerid:
-                self.CM.connect_to_peer(p)
+                self.connect_to_peer(p)
             else:
                 break
 
@@ -495,7 +564,7 @@ class app:
         print(f"[INFO] Updated peer {peer_id} to use port {new_port}.")
         
     def connect_to_peer(self, peer:Peer):
-        self.CM.connect_to_peer(peer)
+        self.dispatchQueue.put((peer, Messages.CONNECT_TO))
 
     def make_handshake(self):
         return (HANDSHAKE_HEADER + (b'\x00' * HANDSHAKE_ZERO_BITS) + self.peerid.to_bytes(4, byteorder='big'))
@@ -504,3 +573,5 @@ if __name__ == "__main__":
     PEERID = int(sys.argv[1])
     a = app(PEERID)
     a.start()
+    time.sleep(30)
+    a.stop()
