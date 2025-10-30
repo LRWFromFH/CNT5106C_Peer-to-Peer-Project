@@ -265,7 +265,7 @@ class app:
             except OSError:
                 continue  # Port already in use — try again.
         INFOMESSAGE(f"Server bound on {self.hostname}:{port}")
-        self.update_port("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg", self.peerid, port)
+        self.update_host("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg", self.peerid, port)
         self.CM = ConnectionManager(self)
         values = self.readConfig("./Configs/project_config_file_small/project_config_file_small/Common.cfg")
         self.NumberOfPreferredNeighbors = values[0]
@@ -449,6 +449,7 @@ class app:
     
     def updatePeerPorts(self, Peers:list[Peer], peer_path:str):
         ports = []
+        addr = []
         with open(peer_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
@@ -457,9 +458,11 @@ class app:
                     #to determine the active peers before we started.
                     continue
                 #<peerID> <hostname/IP> <port> <hasFileFlag>
+                addr.append(parts[1])
                 ports.append(parts[2])
         for i in range(len(Peers)):
             Peers[i].port = ports[i]
+            Peers[i].hostname = addr[i]
 
     def getPeersFromFile(self, peer_path:str):
         Peers = []
@@ -541,7 +544,7 @@ class app:
         self.running = False
         self.CM.stop()
 
-    def update_port(self,config_path: str, peer_id: int, new_port: int):
+    def update_host(self,config_path: str, peer_id: int, new_port: int):
         """
         Updates the port number for a given peer ID in the config file.
         This is necessary for the local peers to find out what ports to connect to.
@@ -558,6 +561,7 @@ class app:
                 # Check if this line matches the peer ID
                 if parts[0] == str(peer_id):
                     # Replace the port (3rd value)
+                    parts[1] = self.hostname
                     parts[2] = str(new_port)
                     updated_line = " ".join(parts)
                 else:
