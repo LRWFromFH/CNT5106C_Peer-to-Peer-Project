@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from queue import Queue, Empty
 import math
 from enum import Enum
+import random
 
 # ----- Constants derived from the project specification -----
 HANDSHAKE_HEADER = b'P2PFILESHARINGPROJ'  # 18 bytes
@@ -67,11 +68,19 @@ class Peer:
     interested: bool = False
     choked: bool = False
     connected:bool = False
+    datasent:int = 0 # The number of pieces of file a Peer
 
     def __post_init__(self):
         self.peerID = int(self.peerID)
         self.port = int(self.port)
         self.hasFileFlag = bool(int(self.hasFileFlag))
+
+    # New functions for choking logic
+    def unchoke(self):
+        self.datasent = 0
+
+    def gotdata(self):
+        self.datasent += 1
 
 class ConnectionManager:
     def __init__(self, app_ref:"app"):
@@ -358,6 +367,16 @@ class app:
                     #Whatever we want to do when we receive an interested message.
                     case Messages.INTERESTED:
                         INFOMESSAGE(f"Received interested message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.NOT_INTERESTED:
+                        INFOMESSAGE(f"Received not interested message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.HAVE: # TODO Implement proper cases for Have, Bitfield, Request, and Piece
+                        INFOMESSAGE(f"Received have message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.BITFIELD:
+                        INFOMESSAGE(f"Received bitfield message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.REQUEST:
+                        INFOMESSAGE(f"Received request message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.PIECE:
+                        INFOMESSAGE(f"Received piece message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case _:
                         print(peer, msg_type)
 
@@ -418,6 +437,14 @@ class app:
                 length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
                 msg_id = bytes([5])
                 data = length_bytes + msg_id + self.bitfield
+            case Messages.REQUEST:  # request
+                length_bytes = (4).to_bytes(4, byteorder='big')
+                msg_id = bytes([6])
+                data = length_bytes + msg_id 
+            case Messages.PIECE:  # piece
+                length_bytes = (self.PieceSize).to_bytes(4, byteorder='big')
+                msg_id = bytes([7])
+                data = length_bytes + msg_id 
         return data
     
     def determineInterest(self, peer:Peer) -> bool:
