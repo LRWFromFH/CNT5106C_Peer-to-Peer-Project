@@ -66,9 +66,11 @@ class Peer:
     bitfield = bytearray()
     newconnection: bool = False
     interested: bool = False
-    choked: bool = False
+    choked: bool = True
     connected:bool = False
     datasent:int = 0 # The number of pieces of file a Peer
+    tiebreak:float = 0 # Random number between 0-1, used to randomly select between two peers with same datasent scores
+    unchokescore:int = 0
 
     def __post_init__(self):
         self.peerID = int(self.peerID)
@@ -78,9 +80,17 @@ class Peer:
     # New functions for choking logic
     def unchoke(self):
         self.datasent = 0
+        self.unchokescore = 0
 
     def gotdata(self):
         self.datasent += 1
+
+    def settiebreak(self):
+        self.tiebreak = random.random()
+
+    def setunchokescore(self):
+        self.settiebreak()
+        self.unchokescore = self.datasent + self.tiebreak
 
 class ConnectionManager:
     def __init__(self, app_ref:"app"):
@@ -409,6 +419,12 @@ class app:
             #            pass
             time.sleep(.1)
 
+    def unchokingLoop(self):
+        pass
+
+    def optimisticUnchokingLoop(self):
+        pass
+
     def createMessage(self, type:Messages):
         data = b''
         match type:
@@ -503,6 +519,13 @@ class app:
                 #<peerID> <hostname/IP> <port> <hasFileFlag>
                 Peers.append(Peer(parts[0], parts[1], parts[2], parts[3]))
         return Peers
+    
+    def findPeer(self, peerid:int):
+        for peer in self.peers:
+            if int(peer.peerID) == int(peerid): 
+                return peer
+        INFOMESSAGE(f"Couldn't find peer with ID {peerid}")
+        return 0
 
     def process_incoming_messages(self):
         """
