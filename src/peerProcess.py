@@ -67,6 +67,7 @@ class Peer:
     newconnection: bool = False
     interested: bool = False
     choked: bool = True
+    chokingUs: bool = True
     connected:bool = False
     datasent:int = 0 # The number of pieces of file a Peer
     tiebreak:float = 0 # Random number between 0-1, used to randomly select between two peers with same datasent scores
@@ -79,6 +80,7 @@ class Peer:
 
     # New functions for choking logic
     def unchoke(self):
+        self.choked = False
         self.datasent = 0
         self.unchokescore = 0
 
@@ -88,9 +90,10 @@ class Peer:
     def settiebreak(self):
         self.tiebreak = random.random()
 
-    def setunchokescore(self):
+    def getunchokescore(self):
         self.settiebreak()
         self.unchokescore = self.datasent + self.tiebreak
+        return self.unchokescore
 
 class ConnectionManager:
     def __init__(self, app_ref:"app"):
@@ -298,6 +301,10 @@ class app:
         self.calcBitfield(self.FileName)
         self.messageQueue = Queue()
         self.dispatchQueue = Queue()
+        self.have_count = 0
+        self.OptimisticallyUnchokedPeer = None
+        self.UnchokedPeers = []
+
 
     def calcBitfield(self, filename:str):
         path = "./Configs/project_config_file_small/project_config_file_small/" + str(self.peerid)+"/"+filename
@@ -338,6 +345,9 @@ class app:
         
         # Save back
         self.bitfield = bytes(bitfield_array)
+
+        # Update count how pieces we have
+        self.have_count += 1
 
         INFOMESSAGE(f"Updated bitfield: now have piece {piece_index}.")
 
@@ -420,10 +430,82 @@ class app:
             time.sleep(.1)
 
     def unchokingLoop(self):
-        pass
+        while(self.running):
+            time.sleep(int(self.UnchokingInterval))
+            INFOMESSAGE("Unchoking peers")
+            NewUnchokedPeers = []
+            if(self.hasCompleteFile()):
+                for i in range(int(self.NumberOfPreferredNeighbors)):
+                    NewUnchokedPeers.append(self.unchokeRandomPeer())
+            else:
+                for i in range(int(self.NumberOfPreferredNeighbors)):
+                    NewUnchokedPeers.append(self.unchokePreferredPeer())
+            for p in self.UnchokedPeers:
+                rechoke = True
+                for q in  NewUnchokedPeers:
+                    if(q == p or p == None):
+                        rechoke = False
+                        break
+                if(not(rechoke)):
+                    continue
+                self.choke(p)
+            self.UnchokedPeers = NewUnchokedPeers
+
+
 
     def optimisticUnchokingLoop(self):
-        pass
+        while(self.running):
+            time.sleep(int(self.OptimisticUnchokingInterval))
+            INFOMESSAGE("Optimistically unchoking peer")
+            NewOptimisticallyUnchokedPeer = self.unchokeRandomPeer(self.OptimisticallyUnchokedPeer)
+            if(not(self.OptimisticallyUnchokedPeer == NewOptimisticallyUnchokedPeer) and not(self.OptimisticallyUnchokedPeer == None)):
+                self.choke(self.OptimisticallyUnchokedPeer)
+                self.OptimisticallyUnchokedPeer = NewOptimisticallyUnchokedPeer
+
+    def unchokeRandomPeer(self, k=[]):
+        ChokedPeers = self.getChokedPeers()
+        if not(k==None):
+            for i in k:
+                ChokedPeers.append(i)
+        if(len(ChokedPeers) == 0):
+            INFOMESSAGE("No peers to unchoke")
+            return
+        peer = random.choice(ChokedPeers)
+        self.unchoke(peer)
+        return peer
+
+    def unchokePreferredPeer(self, k=None, l = None):
+        if l == None:
+            l = []
+        if k == None:
+            k = []
+
+        ChokedPeers = self.getChokedPeers()
+        for i in k:
+            ChokedPeers.append(i)
+        for i in l:
+            for j in ChokedPeers:
+                if(j==i):
+                    ChokedPeers.remove(j)
+
+        if(len(ChokedPeers) == 0):
+            INFOMESSAGE("No peers to unchoke")
+            return
+        peer = self.getPreferredPeer()
+        self.unchoke(peer)
+        return peer
+
+    def getPreferredPeer(self):
+        ChokedPeers = self.getChokedPeers()
+        if(len(ChokedPeers) == 0):
+            INFOMESSAGE("No preferred peer")
+            return
+        peer = ChokedPeers[0]
+        for p in ChokedPeers:
+            if p.getunchokescore() > peer.getunchokescore():
+                peer = p
+        return peer
+
 
     def createMessage(self, type:Messages):
         data = b''
@@ -526,6 +608,31 @@ class app:
                 return peer
         INFOMESSAGE(f"Couldn't find peer with ID {peerid}")
         return 0
+    
+    def getConnectedPeers(self):
+        return [p for p in self.peers if getattr(p, "connected", False)]
+    
+    def getChokedPeers(self):
+        return [p for p in self.peers if getattr(p, "choked", False) and getattr(p, "connected", False)]
+    
+    def getUnchokedPeers(self):
+        return [p for p in self.peers if not(getattr(p, "choked", False)) and getattr(p, "connected", False)]
+    
+    def choke(self, peer):
+        if(peer==None):
+            INFOMESSAGE("Cannot choke Nonetype")
+            return
+        INFOMESSAGE(f"Choked {peer.peerID}")
+        peer.choked = True
+        self.CM.send_to_peer(peer, self.createMessage(Messages.CHOKE))
+
+    def unchoke(self, peer):
+        if(peer==None):
+            INFOMESSAGE("Cannot unchoke Nonetype")
+            return
+        INFOMESSAGE(f"Unchoked {peer.peerID}")
+        peer.unchoke()
+        self.CM.send_to_peer(peer, self.createMessage(Messages.UNCHOKE))
 
     def process_incoming_messages(self):
         """
@@ -581,6 +688,10 @@ class app:
             else:
                 break
 
+    def hasCompleteFile(self):
+        total_pieces = math.ceil(int(self.FileSize) / int(self.PieceSize))
+        return self.have_count >= total_pieces
+
     def check_complete(self):
         pass
 
@@ -588,6 +699,8 @@ class app:
         threading.Thread(target=self.CM.start).start()
         threading.Thread(target=self.process_incoming_messages).start()
         threading.Thread(target=self.managePeers).start()
+        threading.Thread(target=self.unchokingLoop).start()
+        threading.Thread(target=self.optimisticUnchokingLoop).start()
         self.connect_to_initial_peers()
 
     def stop(self):
