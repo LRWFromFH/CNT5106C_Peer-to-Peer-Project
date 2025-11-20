@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from queue import Queue, Empty
 import math
 from enum import Enum
-import random
 
 # ----- Constants derived from the project specification -----
 HANDSHAKE_HEADER = b'P2PFILESHARINGPROJ'  # 18 bytes
@@ -91,7 +90,7 @@ class Peer:
         self.datasent += 1
 
     def settiebreak(self):
-        self.tiebreak = random.random()
+        self.tiebreak = r.random()
 
     def getunchokescore(self):
         self.settiebreak()
@@ -335,6 +334,7 @@ class app:
         self.connectedPeers = []
         self.OptimisticallyUnchokedPeer:Peer = None
         self.UnchokedPeers = []
+        self.neededpiece = None
         self.hasCompleteFile = None
 
 
@@ -425,6 +425,15 @@ class app:
                         #If we receive a handshake, but already have a connection to them, then we can safely ignore it.
                     #We have received a bitfield from and need to simply determine interest in the sender's pieces.
                     #The bitfield has already been set for the peer.
+                    case Messages.CHOKE:
+                        INFOMESSAGE(f"Received choke message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.UNCHOKE:
+                        INFOMESSAGE(f"Received unchoke message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        neededpieces = self.getNeededPieces(peer)
+                        self.neededpiece = r.choice(neededpieces)
+                        self.neededpiece = self.neededpiece.to_bytes(4, "big")
+                        if(not(self.neededpiece == None)):
+                            self.CM.send_to_peer(peer, self.createMessage(Messages.REQUEST))
                     case Messages.BITFIELD:
                         #print(f"Result of interest check: {self.determineInterest(peer)}")
                         if self.determineInterest(peer):
@@ -631,7 +640,7 @@ class app:
             case Messages.REQUEST:  # request
                 length_bytes = (4).to_bytes(4, byteorder='big')
                 msg_id = bytes([6])
-                data = length_bytes + msg_id 
+                data = length_bytes + msg_id + self.neededpiece
             case Messages.PIECE:  # piece
                 length_bytes = (self.PieceSize).to_bytes(4, byteorder='big')
                 msg_id = bytes([7])
@@ -648,6 +657,30 @@ class app:
             if (their_bits[i] & ~my_bits[i]) != 0:
                 return True
         return False  
+    
+    def getNeededPieces(self, peer):
+        our_bitfield = self.bitfield
+        their_bitfield = peer.bitfield
+        neededbits = []
+        if not(len(self.bitfield) == len(peer.bitfield)):
+            INFOMESSAGE("Bitfields different lengths")
+            return
+        
+        for i in range(len(self.bitfield)):
+            our_byte = our_bitfield[i]
+            their_byte = their_bitfield[i]
+
+            diff = ((~our_byte) & 0xFF) & their_byte
+            if diff == 0:
+                continue
+
+            for j in range(8):
+                if(diff & (1 << (7-j))):
+                    index = 8*i + j
+                    neededbits.append(index)
+
+        return neededbits
+
 
     def readConfig(self, config_path):
         values = []
@@ -781,7 +814,8 @@ class app:
                 #peer.interested = self.determineInterest(peer)
                 INFOMESSAGE(f"Bitfield for Peer {peer.peerID} has been set.")
             case Messages.REQUEST: #Request
-                pass
+                pass 
+                INFOMESSAGE(f"Peer {peer.peerID} has requested piece {payload}.")
             case Messages.PIECE: #Piece
                 pass
                 #peer.gotdata()
