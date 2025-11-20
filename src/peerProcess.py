@@ -1,4 +1,3 @@
-from email.policy import default
 import threading
 import socket
 import random as r
@@ -109,10 +108,10 @@ class ConnectionManager:
 
         return valid
     
-    def recv_exact(self,conn, length):
+    def recv_exact(self, conn:socket.socket, length):
         """Receive exactly `length` bytes or return None if connection closed."""
         old_timeout = conn.gettimeout()
-
+        
         buffer = b''
         conn.settimeout(0.5)  # temporary timeout
 
@@ -220,6 +219,8 @@ class ConnectionManager:
         
     def disconnect_from_peer(self, peer:Peer):
         try:
+            #Potentially change boolean connection to false instead of joining thread
+            #The Handle client will close the socket and remove the thread by default.
             peer.sending_socket.close()
             self.stop_thread(peer)
         except:
@@ -283,8 +284,8 @@ class app:
     def calcBitfield(self, filename:str):
         path = "./Configs/project_config_file_small/project_config_file_small/" + str(self.peerid)+"/"+filename
         
-        total_pieces = math.ceil(int(self.FileSize) / int(self.PieceSize)) #Example: 10000232/32768
-        num_bytes = math.ceil(total_pieces / 8) # 306
+        total_pieces = math.ceil(int(self.FileSize) / int(self.PieceSize)) #Example: 2167705/16384 = 133
+        num_bytes = math.ceil(total_pieces / 8) # 17
 
         bitfield = bytearray(num_bytes)
 
