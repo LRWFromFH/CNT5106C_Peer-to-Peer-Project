@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from queue import Queue, Empty
 import math
 from enum import Enum
+import random
 
 # ----- Constants derived from the project specification -----
 HANDSHAKE_HEADER = b'P2PFILESHARINGPROJ'  # 18 bytes
@@ -64,13 +65,34 @@ class Peer:
     bitfield = bytearray()
     newconnection: bool = False
     interested: bool = False
-    choked: bool = False
+    choked: bool = True
+    chokingUs: bool = True
     connected:bool = False
+    datasent:int = 0 # The number of pieces of file a Peer
+    tiebreak:float = 0 # Random number between 0-1, used to randomly select between two peers with same datasent scores
+    unchokescore:int = 0
 
     def __post_init__(self):
         self.peerID = int(self.peerID)
         self.port = int(self.port)
         self.hasFileFlag = bool(int(self.hasFileFlag))
+
+    # New functions for choking logic
+    def unchoke(self):
+        self.choked = False
+        self.datasent = 0
+        self.unchokescore = 0
+
+    def gotdata(self):
+        self.datasent += 1
+
+    def settiebreak(self):
+        self.tiebreak = random.random()
+
+    def getunchokescore(self):
+        self.settiebreak()
+        self.unchokescore = self.datasent + self.tiebreak
+        return self.unchokescore
 
 class ConnectionManager:
     def __init__(self, app_ref:"app"):
@@ -280,6 +302,10 @@ class app:
         self.calcBitfield(self.FileName)
         self.messageQueue = Queue()
         self.dispatchQueue = Queue()
+        self.have_count = 0
+        self.OptimisticallyUnchokedPeer = None
+        self.UnchokedPeers = []
+
 
     def calcBitfield(self, filename:str):
         path = "./Configs/project_config_file_small/project_config_file_small/" + str(self.peerid)+"/"+filename
@@ -321,6 +347,9 @@ class app:
         # Save back
         self.bitfield = bytes(bitfield_array)
 
+        # Update count how pieces we have
+        self.have_count += 1
+
         INFOMESSAGE(f"Updated bitfield: now have piece {piece_index}.")
 
     ## TODO: Change this to a process manager.
@@ -359,6 +388,16 @@ class app:
                     #Whatever we want to do when we receive an interested message.
                     case Messages.INTERESTED:
                         INFOMESSAGE(f"Received interested message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.NOT_INTERESTED:
+                        INFOMESSAGE(f"Received not interested message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.HAVE: # TODO Implement proper cases for Have, Bitfield, Request, and Piece
+                        INFOMESSAGE(f"Received have message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.BITFIELD:
+                        INFOMESSAGE(f"Received bitfield message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.REQUEST:
+                        INFOMESSAGE(f"Received request message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                    case Messages.PIECE:
+                        INFOMESSAGE(f"Received piece message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case _:
                         print(peer, msg_type)
 
@@ -391,6 +430,84 @@ class app:
             #            pass
             time.sleep(.1)
 
+    def unchokingLoop(self):
+        while(self.running):
+            time.sleep(int(self.UnchokingInterval))
+            INFOMESSAGE("Unchoking peers")
+            NewUnchokedPeers = []
+            if(self.hasCompleteFile()):
+                for i in range(int(self.NumberOfPreferredNeighbors)):
+                    NewUnchokedPeers.append(self.unchokeRandomPeer())
+            else:
+                for i in range(int(self.NumberOfPreferredNeighbors)):
+                    NewUnchokedPeers.append(self.unchokePreferredPeer())
+            for p in self.UnchokedPeers:
+                rechoke = True
+                for q in  NewUnchokedPeers:
+                    if(q == p or p == None):
+                        rechoke = False
+                        break
+                if(not(rechoke)):
+                    continue
+                self.choke(p)
+            self.UnchokedPeers = NewUnchokedPeers
+
+
+
+    def optimisticUnchokingLoop(self):
+        while(self.running):
+            time.sleep(int(self.OptimisticUnchokingInterval))
+            INFOMESSAGE("Optimistically unchoking peer")
+            NewOptimisticallyUnchokedPeer = self.unchokeRandomPeer(self.OptimisticallyUnchokedPeer)
+            if(not(self.OptimisticallyUnchokedPeer == NewOptimisticallyUnchokedPeer) and not(self.OptimisticallyUnchokedPeer == None)):
+                self.choke(self.OptimisticallyUnchokedPeer)
+                self.OptimisticallyUnchokedPeer = NewOptimisticallyUnchokedPeer
+
+    def unchokeRandomPeer(self, k=[]):
+        ChokedPeers = self.getChokedPeers()
+        if not(k==None):
+            for i in k:
+                ChokedPeers.append(i)
+        if(len(ChokedPeers) == 0):
+            INFOMESSAGE("No peers to unchoke")
+            return
+        peer = random.choice(ChokedPeers)
+        self.unchoke(peer)
+        return peer
+
+    def unchokePreferredPeer(self, k=None, l = None):
+        if l == None:
+            l = []
+        if k == None:
+            k = []
+
+        ChokedPeers = self.getChokedPeers()
+        for i in k:
+            ChokedPeers.append(i)
+        for i in l:
+            for j in ChokedPeers:
+                if(j==i):
+                    ChokedPeers.remove(j)
+
+        if(len(ChokedPeers) == 0):
+            INFOMESSAGE("No peers to unchoke")
+            return
+        peer = self.getPreferredPeer()
+        self.unchoke(peer)
+        return peer
+
+    def getPreferredPeer(self):
+        ChokedPeers = self.getChokedPeers()
+        if(len(ChokedPeers) == 0):
+            INFOMESSAGE("No preferred peer")
+            return
+        peer = ChokedPeers[0]
+        for p in ChokedPeers:
+            if p.getunchokescore() > peer.getunchokescore():
+                peer = p
+        return peer
+
+
     def createMessage(self, type:Messages):
         data = b''
         match type:
@@ -419,6 +536,14 @@ class app:
                 length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
                 msg_id = bytes([5])
                 data = length_bytes + msg_id + self.bitfield
+            case Messages.REQUEST:  # request
+                length_bytes = (4).to_bytes(4, byteorder='big')
+                msg_id = bytes([6])
+                data = length_bytes + msg_id 
+            case Messages.PIECE:  # piece
+                length_bytes = (self.PieceSize).to_bytes(4, byteorder='big')
+                msg_id = bytes([7])
+                data = length_bytes + msg_id 
         return data
     
     def determineInterest(self, peer:Peer) -> bool:
@@ -477,6 +602,38 @@ class app:
                 #<peerID> <hostname/IP> <port> <hasFileFlag>
                 Peers.append(Peer(parts[0], parts[1], parts[2], parts[3]))
         return Peers
+    
+    def findPeer(self, peerid:int):
+        for peer in self.peers:
+            if int(peer.peerID) == int(peerid): 
+                return peer
+        INFOMESSAGE(f"Couldn't find peer with ID {peerid}")
+        return 0
+    
+    def getConnectedPeers(self):
+        return [p for p in self.peers if getattr(p, "connected", False)]
+    
+    def getChokedPeers(self):
+        return [p for p in self.peers if getattr(p, "choked", False) and getattr(p, "connected", False) and getattr(p, "interested", False)]
+    
+    def getUnchokedPeers(self):
+        return [p for p in self.peers if not(getattr(p, "choked", False)) and getattr(p, "connected", False) and getattr(p, "interested", False)]
+    
+    def choke(self, peer):
+        if(peer==None):
+            INFOMESSAGE("Cannot choke Nonetype")
+            return
+        INFOMESSAGE(f"Choked {peer.peerID}")
+        peer.choked = True
+        self.CM.send_to_peer(peer, self.createMessage(Messages.CHOKE))
+
+    def unchoke(self, peer):
+        if(peer==None):
+            INFOMESSAGE("Cannot unchoke Nonetype")
+            return
+        INFOMESSAGE(f"Unchoked {peer.peerID}")
+        peer.unchoke()
+        self.CM.send_to_peer(peer, self.createMessage(Messages.UNCHOKE))
 
     def process_incoming_messages(self):
         """
@@ -496,9 +653,11 @@ class app:
 
         match msg_type:
             case Messages.CHOKE:
-                pass
+                peer.chokingUs = True
+                self.dispatchQueue.put((peer, Messages.CHOKE))
             case Messages.UNCHOKE: #Unchoke
-                pass
+                peer.chokingUs = False
+                self.dispatchQueue.put((peer, Messages.UNCHOKE))
             case Messages.INTERESTED: #interested
                 INFOMESSAGE("INTEREST MESSAGE RECEIVED")
                 self.dispatchQueue.put((peer, Messages.INTERESTED))
@@ -514,7 +673,7 @@ class app:
             case Messages.REQUEST: #Request
                 pass
             case Messages.PIECE: #Piece
-                pass
+                peer.gotdata()
             case Messages.HANDSHAKE:#Received handshake
                 INFOMESSAGE(f"HANDSHAKE RECEIVED.")
                 self.dispatchQueue.put((peer,Messages.HANDSHAKE))
@@ -532,6 +691,10 @@ class app:
             else:
                 break
 
+    def hasCompleteFile(self):
+        total_pieces = math.ceil(int(self.FileSize) / int(self.PieceSize))
+        return self.have_count >= total_pieces
+
     def check_complete(self):
         pass
 
@@ -539,6 +702,8 @@ class app:
         threading.Thread(target=self.CM.start).start()
         threading.Thread(target=self.process_incoming_messages).start()
         threading.Thread(target=self.managePeers).start()
+        threading.Thread(target=self.unchokingLoop).start()
+        threading.Thread(target=self.optimisticUnchokingLoop).start()
         self.connect_to_initial_peers()
 
     def stop(self):
