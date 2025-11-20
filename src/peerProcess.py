@@ -613,10 +613,10 @@ class app:
         return [p for p in self.peers if getattr(p, "connected", False)]
     
     def getChokedPeers(self):
-        return [p for p in self.peers if getattr(p, "choked", False) and getattr(p, "connected", False)]
+        return [p for p in self.peers if getattr(p, "choked", False) and getattr(p, "connected", False) and getattr(p, "interested", False)]
     
     def getUnchokedPeers(self):
-        return [p for p in self.peers if not(getattr(p, "choked", False)) and getattr(p, "connected", False)]
+        return [p for p in self.peers if not(getattr(p, "choked", False)) and getattr(p, "connected", False) and getattr(p, "interested", False)]
     
     def choke(self, peer):
         if(peer==None):
@@ -652,9 +652,11 @@ class app:
 
         match msg_type:
             case Messages.CHOKE:
-                pass
+                peer.chokingUs = True
+                self.dispatchQueue.put((peer, Messages.CHOKE))
             case Messages.UNCHOKE: #Unchoke
-                pass
+                peer.chokingUs = False
+                self.dispatchQueue.put((peer, Messages.UNCHOKE))
             case Messages.INTERESTED: #interested
                 INFOMESSAGE("INTEREST MESSAGE RECEIVED")
                 self.dispatchQueue.put((peer, Messages.INTERESTED))
@@ -670,7 +672,7 @@ class app:
             case Messages.REQUEST: #Request
                 pass
             case Messages.PIECE: #Piece
-                pass
+                peer.gotdata()
             case Messages.HANDSHAKE:#Received handshake
                 INFOMESSAGE(f"HANDSHAKE RECEIVED.")
                 self.dispatchQueue.put((peer,Messages.HANDSHAKE))
