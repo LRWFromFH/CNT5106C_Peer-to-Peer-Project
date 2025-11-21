@@ -400,7 +400,7 @@ class app:
             try:
                 peer:Peer
                 msg_type:Messages
-                payload:bytes
+                payload:int
                 peer, msg_type, payload = self.dispatchQueue.get_nowait()
 
                 match msg_type:
@@ -428,22 +428,30 @@ class app:
                     case Messages.BITFIELD:
                         #print(f"Result of interest check: {self.determineInterest(peer)}")
                         if self.determineInterest(peer):
-                            self.CM.send_to_peer(peer, self.createMessage(Messages.INTERESTED))
+                            self.dispatchQueue.put((peer, Messages.INTERESTED, None))
+                        else:
+                            self.dispatchQueue.put((peer, Messages.NOT_INTERESTED, None))
                     #Whatever we want to do when we receive an interested message.
                     case Messages.INTERESTED:
-                        INFOMESSAGE(f"Received interested message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        self.CM.send_to_peer(peer, self.createMessage(Messages.INTERESTED))
+                        INFOMESSAGE(f"Sending INTERESTED to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.NOT_INTERESTED:
-                        INFOMESSAGE(f"Received not interested message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        self.CM.send_to_peer(peer, self.createMessage(Messages.NOT_INTERESTED))
+                        INFOMESSAGE(f"Sending NOT_INTERESTED to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.HAVE: # TODO Implement proper cases for Have, Bitfield, Request, and Piece
-                        INFOMESSAGE(f"Received have message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        self.CM.send_to_peer(peer, self.createMessage(Messages.HAVE, payload))
+                        INFOMESSAGE(f"Sending HAVE message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
                         #If we receive a have message, we need to update the bitfield for that peer.
                     case Messages.REQUEST:
+                        #Asking for piece
+                        self.CM.send_to_peer(peer, self.createMessage(Messages.REQUEST, payload))
                         #We have received a request message and should determine if they are unchoked/can be sent to.
-                        INFOMESSAGE(f"Received request message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        INFOMESSAGE(f"Sending REQUEST message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.PIECE:
                         #This is the case that we have received a piece from a peer, we need to update our own bitfield.
                         #This should not get sent to us if we have the complete file
-                        INFOMESSAGE(f"Received piece message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        self.CM.send_to_peer(peer, self.createMessage(Messages.PIECE, payload))
+                        INFOMESSAGE(f"Sending PIECE message to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.CHOKE:
                         self.CM.send_to_peer(peer, self.createMessage(Messages.CHOKE))
                     case Messages.UNCHOKE:
@@ -558,7 +566,7 @@ class app:
         if(len(ChokedPeers) == 0):
             INFOMESSAGE("No peers to unchoke")
             return None
-        peer = random.choice(ChokedPeers)
+        peer = r.choice(ChokedPeers)
         self.unchoke(peer)
         return peer
 
@@ -600,7 +608,7 @@ class app:
         return peer
 
 
-    def createMessage(self, type:Messages):
+    def createMessage(self, type:Messages, index:int=None):
         data = b''
         match type:
             case Messages.CHOKE:
@@ -633,7 +641,9 @@ class app:
                 msg_id = bytes([6])
                 data = length_bytes + msg_id 
             case Messages.PIECE:  # piece
-                length_bytes = (self.PieceSize).to_bytes(4, byteorder='big')
+                #TODO: Implement file IO calls here to send bytes.
+                #length_bytes = int(self.PieceSize).to_bytes(4, byteorder='big')
+                length_bytes = (0).to_bytes(4, byteorder='big')
                 msg_id = bytes([7])
                 data = length_bytes + msg_id 
         return data
@@ -648,6 +658,29 @@ class app:
             if (their_bits[i] & ~my_bits[i]) != 0:
                 return True
         return False  
+    
+    def getNeededPieces(self, peer:Peer):
+        our_bitfield = self.bitfield
+        their_bitfield = peer.bitfield
+        neededbits = []
+        if not(len(self.bitfield) == len(peer.bitfield)):
+            INFOMESSAGE("Bitfields different lengths")
+            return
+        
+        for i in range(len(self.bitfield)):
+            our_byte = our_bitfield[i]
+            their_byte = their_bitfield[i]
+
+            diff = ((~our_byte) & 0xFF) & their_byte
+            if diff == 0:
+                continue
+
+            for j in range(8):
+                if(diff & (1 << (7-j))):
+                    index = 8*i + j
+                    neededbits.append(index)
+
+        return neededbits
 
     def readConfig(self, config_path):
         values = []
@@ -756,6 +789,12 @@ class app:
                     peer.chokingUs = False
                     #Request message here
                     INFOMESSAGE("We should request something.")
+                    neededpieces = self.getNeededPieces(peer)
+                    INFOMESSAGE(f"{peer.peerID}")
+                    if(not(neededpieces == None)):
+                        neededpiece = r.choice(neededpieces)
+                        neededpiece = neededpiece.to_bytes(4, "big")
+                        self.dispatchQueue.put((peer, Messages.REQUEST, neededpiece))
                 else:
                 # We should ignore this if they were not already choking us.    
                     INFOMESSAGE("Received unchoke message.")
@@ -765,10 +804,10 @@ class app:
             case Messages.INTERESTED: #interested
                 INFOMESSAGE("INTEREST MESSAGE RECEIVED")
                 peer.interested = True
-                self.dispatchQueue.put((peer, Messages.INTERESTED, None))
+                #self.dispatchQueue.put((peer, Messages.INTERESTED, None))
             case Messages.NOT_INTERESTED: #Not interested
                 peer.interested = False
-                self.dispatchQueue.put((peer, Messages.NOT_INTERESTED, None))
+                #self.dispatchQueue.put((peer, Messages.NOT_INTERESTED, None))
                 #Should probably send choke message.
             case Messages.HAVE: #Have
                 #Payload is a 4-byte piece index.
@@ -781,9 +820,11 @@ class app:
                 #peer.interested = self.determineInterest(peer)
                 INFOMESSAGE(f"Bitfield for Peer {peer.peerID} has been set.")
             case Messages.REQUEST: #Request
-                pass
+                payload = int.from_bytes(payload,"big")
+                self.dispatchQueue.put((peer, Messages.PIECE,payload))
+                INFOMESSAGE("Request message received.")
             case Messages.PIECE: #Piece
-                pass
+                INFOMESSAGE("PIECE MESSAGE RECEIVED - THIS MUST BE FIELDED.")
                 #peer.gotdata()
             case Messages.HANDSHAKE:#Received handshake
                 INFOMESSAGE(f"HANDSHAKE RECEIVED.")
