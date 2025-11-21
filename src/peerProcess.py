@@ -8,6 +8,7 @@ from queue import Queue, Empty
 import math
 from enum import Enum
 import random
+import os
 
 # ----- Constants derived from the project specification -----
 HANDSHAKE_HEADER = b'P2PFILESHARINGPROJ'  # 18 bytes
@@ -336,6 +337,7 @@ class app:
         self.OptimisticallyUnchokedPeer:Peer = None
         self.UnchokedPeers = []
         self.hasCompleteFile = None
+        self.most_recent_piece = None
 
 
     def calcBitfield(self, filename:str):
@@ -439,7 +441,7 @@ class app:
                         self.CM.send_to_peer(peer, self.createMessage(Messages.NOT_INTERESTED))
                         INFOMESSAGE(f"Sending NOT_INTERESTED to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.HAVE: # TODO Implement proper cases for Have, Bitfield, Request, and Piece
-                        self.CM.send_to_peer(peer, self.createMessage(Messages.HAVE, payload))
+                        self.CM.send_to_peer(peer, self.createMessage(Messages.HAVE, int.from_bytes(payload,"big")))
                         INFOMESSAGE(f"Sending HAVE message from peer {peer.peerID} @{peer.hostname}:{peer.port}")
                         #If we receive a have message, we need to update the bitfield for that peer.
                     case Messages.REQUEST:
@@ -631,7 +633,7 @@ class app:
                 #TODO: Implement correct version of HAVE
                 length_bytes = (0).to_bytes(4, byteorder='big')
                 msg_id = bytes([4])
-                data = length_bytes + msg_id
+                data = length_bytes + msg_id + index.to_bytes(4, "big")
             case Messages.BITFIELD:  # bitfield
                 length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
                 msg_id = bytes([5])
@@ -760,6 +762,14 @@ class app:
         peer.unchoke()
         #self.CM.send_to_peer(peer, self.createMessage(Messages.UNCHOKE))
 
+
+    def sendHavetoNeighbors(self, piece_index):
+        neighbors = self.getConnectedPeers()
+        if not(neighbors) == []:
+            for peer in neighbors:
+                if not(peer == None):
+                    self.dispatchQueue.put((peer,Messages.HAVE, piece_index))
+
     def process_incoming_messages(self):
         """
         Runs in a separate thread or main loop to process messages.
@@ -813,6 +823,8 @@ class app:
                 #Payload is a 4-byte piece index.
                 payload = int.from_bytes(payload,"big")
                 self.updateBitfield(peer, payload)
+                if self.determineInterest(peer):
+                    self.dispatchQueue.put((peer, Messages.INTERESTED, None))
                 pass
             case Messages.BITFIELD: #Bitfield
                 peer.bitfield = bytearray(payload)
@@ -825,6 +837,7 @@ class app:
                 INFOMESSAGE("Request message received.")
             case Messages.PIECE: #Piece
                 INFOMESSAGE("PIECE MESSAGE RECEIVED - THIS MUST BE FIELDED.")
+                self.sendHavetoNeighbors(self, payload[:4])
                 #peer.gotdata()
             case Messages.HANDSHAKE:#Received handshake
                 INFOMESSAGE(f"HANDSHAKE RECEIVED.")
