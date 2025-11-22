@@ -364,6 +364,7 @@ class app:
                 bitfield[byte_index] |= (1 << bit_index)
         else:
             # For now, all zeros
+            self.initialize_empty_file()
             pass
 
         self.bitfield = bytes(bitfield)
@@ -501,6 +502,7 @@ class app:
             for c in self.connectedPeers:
                 if c != self.OptimisticallyUnchokedPeer:
                     c.choked = True
+                    pass
 
             time.sleep(int(self.UnchokingInterval))
             INFOMESSAGE("Unchoking peers")
@@ -526,6 +528,7 @@ class app:
             for c in self.connectedPeers:
                 if c.choked:
                     #Put choke message on dispatch queue.
+                    INFOMESSAGE(f"Choking {c.peerID}")
                     self.dispatchQueue.put((c,Messages.CHOKE,None))
                 else:
                     #Put unchoke message on dispatch queue.
@@ -610,7 +613,7 @@ class app:
         return peer
 
 
-    def createMessage(self, type:Messages, index:int=None):
+    def createMessage(self, type:Messages, payload=None):
         data = b''
         match type:
             case Messages.CHOKE:
@@ -631,9 +634,9 @@ class app:
                 data = length_bytes + msg_id
             case Messages.HAVE: # Have
                 #TODO: Implement correct version of HAVE
-                length_bytes = (0).to_bytes(4, byteorder='big')
+                length_bytes = (4).to_bytes(4, byteorder='big')
                 msg_id = bytes([4])
-                data = length_bytes + msg_id + index.to_bytes(4, "big")
+                data = length_bytes + msg_id + payload.to_bytes(4, "big")
             case Messages.BITFIELD:  # bitfield
                 length_bytes = len(self.bitfield).to_bytes(4, byteorder='big')
                 msg_id = bytes([5])
@@ -641,13 +644,15 @@ class app:
             case Messages.REQUEST:  # request
                 length_bytes = (4).to_bytes(4, byteorder='big')
                 msg_id = bytes([6])
-                data = length_bytes + msg_id 
+                data = length_bytes + msg_id + payload
             case Messages.PIECE:  # piece
                 #TODO: Implement file IO calls here to send bytes.
                 #length_bytes = int(self.PieceSize).to_bytes(4, byteorder='big')
-                length_bytes = (0).to_bytes(4, byteorder='big')
+                if payload is None:
+                    raise ValueError("PIECE requires payload (index+piece bytes)")
+                length_bytes = (len(payload)).to_bytes(4, byteorder='big')
                 msg_id = bytes([7])
-                data = length_bytes + msg_id 
+                data = length_bytes + msg_id + payload
         return data
     
     def determineInterest(self, peer:Peer) -> bool:
@@ -752,7 +757,7 @@ class app:
             return
         INFOMESSAGE(f"Choked {peer.peerID}")
         peer.choked = True
-        #self.CM.send_to_peer(peer, self.createMessage(Messages.CHOKE))
+        self.dispatchQueue.put((peer,Messages.CHOKE,None))
 
     def unchoke(self, peer:Peer):
         if(peer==None):
@@ -760,7 +765,7 @@ class app:
             return
         INFOMESSAGE(f"Unchoked {peer.peerID}")
         peer.unchoke()
-        #self.CM.send_to_peer(peer, self.createMessage(Messages.UNCHOKE))
+        self.dispatchQueue.put((peer,Messages.UNCHOKE,None))
 
 
     def sendHavetoNeighbors(self, piece_index):
@@ -769,6 +774,36 @@ class app:
             for peer in neighbors:
                 if not(peer == None):
                     self.dispatchQueue.put((peer,Messages.HAVE, piece_index))
+
+    def read_piece(self, byte_index):
+        index = int.from_bytes(byte_index, "big")
+        offset = index * int(self.PieceSize)
+        path = "./Configs/project_config_file_small/project_config_file_small/" + str(self.peerid) + "/" + self.FileName
+
+        with open(path, "rb") as file:
+            file.seek(offset)
+            return file.read(int(self.PieceSize))
+
+
+    def store_piece(self, byte_index, piece):
+        index = int.from_bytes(byte_index, "big")
+        offset = index * int(self.PieceSize)
+        path = "./Configs/project_config_file_small/project_config_file_small/" + str(self.peerid) + "/" + self.FileName
+
+        with open(path, "r+b") as file:
+            file.seek(offset)
+            file.write(piece)
+
+
+    def initialize_empty_file(self):
+        path = f"./Configs/project_config_file_small/project_config_file_small/{self.peerid}/{self.FileName}"
+        file_size = int(self.FileSize)
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        with open(path, "wb") as f:
+            f.truncate(file_size)
+
 
     def process_incoming_messages(self):
         """
@@ -832,12 +867,20 @@ class app:
                 #peer.interested = self.determineInterest(peer)
                 INFOMESSAGE(f"Bitfield for Peer {peer.peerID} has been set.")
             case Messages.REQUEST: #Request
-                payload = int.from_bytes(payload,"big")
+                piece = self.read_piece(payload)
+                #payload = int.from_bytes(payload,"big")
+                payload = payload + piece
                 self.dispatchQueue.put((peer, Messages.PIECE,payload))
                 INFOMESSAGE("Request message received.")
             case Messages.PIECE: #Piece
                 INFOMESSAGE("PIECE MESSAGE RECEIVED - THIS MUST BE FIELDED.")
-                self.sendHavetoNeighbors(self, payload[:4])
+                self.store_piece(payload[:4],payload[4:])
+                self.sendHavetoNeighbors(payload[:4])
+                neededpieces = self.getNeededPieces(peer)
+                if(not(neededpieces == None)):
+                    neededpiece = r.choice(neededpieces)
+                    neededpiece = neededpiece.to_bytes(4, "big")
+                    self.dispatchQueue.put((peer, Messages.REQUEST, neededpiece))
                 #peer.gotdata()
             case Messages.HANDSHAKE:#Received handshake
                 INFOMESSAGE(f"HANDSHAKE RECEIVED.")
