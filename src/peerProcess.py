@@ -982,8 +982,9 @@ class app:
 
     def start(self):
         threading.Thread(target=self.CM.start).start()
-        threading.Thread(target=self.process_incoming_messages).start()
-        threading.Thread(target=self.managePeers).start()
+        for i in range(int(self.NumberOfPreferredNeighbors)):
+            threading.Thread(target=self.process_incoming_messages).start()
+            threading.Thread(target=self.managePeers).start()
         threading.Thread(target=self.unchokingLoop).start()
         threading.Thread(target=self.optimisticUnchokingLoop).start()
         threading.Thread(target=self.should_stop).start()
