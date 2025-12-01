@@ -9,6 +9,7 @@ import math
 from enum import Enum
 import random
 import os
+from datetime import datetime
 
 # ----- Constants derived from the project specification -----
 HANDSHAKE_HEADER = b'P2PFILESHARINGPROJ'  # 18 bytes
@@ -196,6 +197,7 @@ class ConnectionManager:
             
             # Notify the app
             INFOMESSAGE(f"Valid handshake from {addr}")
+            self.app_ref.write_log(f"Peer {self.app_ref.peerid} is connected from Peer {peer_obj.peerID}.")
             peer_obj.connected = True
             self.app_ref.messageQueue.put((peer_obj, Messages.HANDSHAKE, None))
 
@@ -284,7 +286,8 @@ class ConnectionManager:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             s.connect((peer.hostname, int(peer.port)))
-            INFOMESSAGE(f"Connected to peer {peer.hostname}:{peer.port}")
+            #INFOMESSAGE(f"Connected to peer {peer.hostname}:{peer.port}")
+            self.app_ref.write_log(f"Peer {self.app_ref.peerid} makes a connection to Peer {peer.peerID}.")
             peer.sending_socket = s
             # Start a receiver thread for this connection if needed
         except Exception as e:
@@ -311,6 +314,8 @@ class app:
     def __init__(self, PEERID):
         self.hostname = socket.gethostbyname(socket.gethostname())
         self.peerid = PEERID
+        self.log_file = f"log_peer_{self.peerid}.log"
+        self.log_lock = threading.Lock()
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         while True:
             port = r.randint(2000, 6000)
@@ -319,7 +324,8 @@ class app:
                 break  # Success! Exit loop.
             except OSError:
                 continue  # Port already in use — try again.
-        INFOMESSAGE(f"Server bound on {self.hostname}:{port}")
+        #INFOMESSAGE(f"Server bound on {self.hostname}:{port}")
+        self.write_log(f"Server bound on {self.hostname}:{port}")
         self.update_host("./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg", self.peerid, port)
         self.CM = ConnectionManager(self)
         values = self.readConfig("./Configs/project_config_file_small/project_config_file_small/Common.cfg")
@@ -413,7 +419,7 @@ class app:
             # Update count how pieces we have
             
 
-        INFOMESSAGE(f"Updated bitfield: now have piece {piece_index}.")
+        #INFOMESSAGE(f"Updated bitfield: now have piece {piece_index}.")
 
     ## TODO: Change this to a process manager.
     ## The process will instead use a thread safe queue to tasks based on messages received.
@@ -430,7 +436,8 @@ class app:
                     #We have to connect to
                     case Messages.CONNECT_TO:
                         self.updatePeerPorts(self.peers, "./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg")
-                        INFOMESSAGE(f"Connecting to peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        #INFOMESSAGE(f"Connecting to peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        self.write_log(f"Connecting to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                         self.CM.connect_to_peer(peer)
                         self.CM.send_to_peer(peer, self.make_handshake())
                         self.CM.send_to_peer(peer, self.createMessage(Messages.BITFIELD))
@@ -461,33 +468,33 @@ class app:
                     #Whatever we want to do when we receive an interested message.
                     case Messages.INTERESTED:
                         self.CM.send_to_peer(peer, self.createMessage(Messages.INTERESTED))
-                        INFOMESSAGE(f"Sending INTERESTED to peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        #INFOMESSAGE(f"Sending INTERESTED to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.NOT_INTERESTED:
                         self.CM.send_to_peer(peer, self.createMessage(Messages.NOT_INTERESTED))
-                        INFOMESSAGE(f"Sending NOT_INTERESTED to peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        #INFOMESSAGE(f"Sending NOT_INTERESTED to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.HAVE: # TODO Implement proper cases for Have, Bitfield, Request, and Piece
                         p:Peer
                         for p in self.peers:
                             if p.peerID != peer and p.connected:
                                 self.CM.send_to_peer(p, self.createMessage(Messages.HAVE, payload))
-                                INFOMESSAGE(f"Sending HAVE message to peer {p.peerID} @{p.hostname}:{p.port}")
+                                #INFOMESSAGE(f"Sending HAVE message to peer {p.peerID} @{p.hostname}:{p.port}")
                         #If we receive a have message, we need to update the bitfield for that peer.
                     case Messages.REQUEST:
                         #Asking for piece
                         self.CM.send_to_peer(peer, self.createMessage(Messages.REQUEST, payload))
                         #We have received a request message and should determine if they are unchoked/can be sent to.
-                        INFOMESSAGE(f"Sending REQUEST message to peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        #INFOMESSAGE(f"Sending REQUEST message to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.PIECE:
                         #Need to send a piece.
                         #This should not get sent to us if we have the complete file
                         self.CM.send_to_peer(peer, self.createMessage(Messages.PIECE, payload))
-                        INFOMESSAGE(f"Sending PIECE message to peer {peer.peerID} @{peer.hostname}:{peer.port}")
+                        #INFOMESSAGE(f"Sending PIECE message to peer {peer.peerID} @{peer.hostname}:{peer.port}")
                     case Messages.CHOKE:
                         self.CM.send_to_peer(peer, self.createMessage(Messages.CHOKE))
                     case Messages.UNCHOKE:
                         self.CM.send_to_peer(peer, self.createMessage(Messages.UNCHOKE))
                     case Messages.COMPLETE:
-                        INFOMESSAGE("Sending COMPLETE to Peer")
+                        #INFOMESSAGE("Sending COMPLETE to Peer")
                         p:Peer
                         for p in self.peers:
                             if p.peerID == self.peerid:
@@ -560,6 +567,10 @@ class app:
                         NewUnchokedPeers.append(p)
                     else:
                         break
+                new_ids = [p.peerID for p in NewUnchokedPeers]
+
+                ids_str = ", ".join(str(x) for x in new_ids)
+                self.write_log(f"Peer {self.peerid} has the preferred neighbors {ids_str}.")
             for c in self.connectedPeers:
                 if c.choked:
                     #Put choke message on dispatch queue.
@@ -596,6 +607,7 @@ class app:
             if(not(self.OptimisticallyUnchokedPeer == NewOptimisticallyUnchokedPeer) and not(self.OptimisticallyUnchokedPeer == None)):
                 self.choke(self.OptimisticallyUnchokedPeer)
                 self.OptimisticallyUnchokedPeer = NewOptimisticallyUnchokedPeer
+                self.write_log(f"Peer {self.peerid} has the optimistically unchoked neighbor {NewOptimisticallyUnchokedPeer.peerID}.")
 
     def unchokeRandomPeer(self, k=[]):
         ChokedPeers = self.getChokedPeers()
@@ -796,7 +808,7 @@ class app:
         if(peer==None):
             INFOMESSAGE("Cannot choke Nonetype")
             return
-        INFOMESSAGE(f"Choked {peer.peerID}")
+        #INFOMESSAGE(f"Choked {peer.peerID}")
         peer.choked = True
         #self.CM.send_to_peer(peer, self.createMessage(Messages.CHOKE))
 
@@ -804,7 +816,7 @@ class app:
         if(peer==None):
             INFOMESSAGE("Cannot unchoke Nonetype")
             return
-        INFOMESSAGE(f"Unchoked {peer.peerID}")
+        #INFOMESSAGE(f"Unchoked {peer.peerID}")
         peer.unchoke()
         #self.CM.send_to_peer(peer, self.createMessage(Messages.UNCHOKE))
 
@@ -829,10 +841,12 @@ class app:
 
         match msg_type:
             case Messages.CHOKE:
+                self.write_log(f"Peer {self.peerid} is choked by {peer.peerID}.")
                 peer.chokingUs = True
                 #INFOMESSAGE("Received choke message.")
                 #self.dispatchQueue.put((peer, Messages.CHOKE, None))
             case Messages.UNCHOKE: #Unchoke
+                self.write_log(f"Peer {self.peerid} is unchoked by {peer.peerID}.")
                 peer.chokingUs = False
                 #Request message here
                 #INFOMESSAGE("We should request something.")
@@ -845,15 +859,18 @@ class app:
                 
             case Messages.INTERESTED: #interested
                 #INFOMESSAGE("INTEREST MESSAGE RECEIVED")
+                self.write_log(f"Peer {self.peerid} received the 'interested' message from {peer.peerID}.")
                 peer.interested = True
                 #self.dispatchQueue.put((peer, Messages.INTERESTED, None))
             case Messages.NOT_INTERESTED: #Not interested
+                self.write_log(f"Peer {self.peerid} received the 'not interested' message from {peer.peerID}.")
                 peer.interested = False
                 #self.dispatchQueue.put((peer, Messages.NOT_INTERESTED, None))
                 #Should probably send choke message.
             case Messages.HAVE: #Have
                 #Payload is a 4-byte piece index.
                 payload = int.from_bytes(payload,"big")
+                self.write_log(f"Peer {self.peerid} received the 'have' message from {peer.peerID} for the piece {payload}.")
                 self.updateBitfield(peer, payload)
                 #Determine Interest
                 self.dispatchQueue.put((peer, Messages.BITFIELD, None))
@@ -868,11 +885,12 @@ class app:
                 #INFOMESSAGE("Request message received.")
             case Messages.PIECE: #Piece
                 if not self.hasCompleteFile:
+                    self.write_log(f"Peer {self.peerid} has downloaded the piece {int.from_bytes(payload[0:4], byteorder='big')} from {peer.peerID}. Now the number of pieces it has is {self.have_count}.")
                     self.store_piece(payload[0:4],payload[4:])
                     self.updateBitfield(None, int.from_bytes(payload[0:4], byteorder='big'))
                     self.dispatchQueue.put((self.peerid, Messages.HAVE, payload[0:4]))
                     #self.dispatchQueue.put((peer, Messages.BITFIELD, None))
-                    INFOMESSAGE(f"PIECE {int.from_bytes(payload[0:4], byteorder='big')} RECEIVED from {peer.peerID}.")
+                    #INFOMESSAGE(f"PIECE {int.from_bytes(payload[0:4], byteorder='big')} RECEIVED from {peer.peerID}.")
                     if self.check_complete():
                         p:Peer
                         for p in self.peers:
@@ -895,13 +913,14 @@ class app:
                 #Send have message to peer.
                 #peer.gotdata()
             case Messages.HANDSHAKE:#Received handshake
-                INFOMESSAGE(f"HANDSHAKE RECEIVED.")
+                #INFOMESSAGE(f"HANDSHAKE RECEIVED.")
                 self.dispatchQueue.put((peer,Messages.HANDSHAKE, None))
             case Messages.COMPLETE:
-                INFOMESSAGE("COMPLETE MESSAGE RECEIVED.")
+                #INFOMESSAGE("COMPLETE MESSAGE RECEIVED.")
                 peer.hasFileFlag = True
                 peer.bitfield = self.full_bitfield
                 peer.complete = True
+                self.write_log(f"Peer {peer.peerID} has downloaded the complete file.")
         
     def connect_to_initial_peers(self):
         """
@@ -950,12 +969,14 @@ class app:
 
             if self.check_complete() and not self.hasCompleteFile:
                 self.hasCompleteFile = True
-                INFOMESSAGE("We completed the file!")
+                #INFOMESSAGE("We completed the file!")
+                self.write_log(f"Peer {self.peerid} has downloaded the complete file.")
                 for p in self.connectedPeers:
                     self.dispatchQueue.put((None, Messages.COMPLETE, None))
 
             if self.check_all_complete():
-                INFOMESSAGE("All peers have the file.")
+                #INFOMESSAGE("All peers have the file.")
+                self.write_log("All peers have the file.")
                 self.stop()  
             time.sleep(1)
 
@@ -1052,6 +1073,16 @@ class app:
         if not os.path.exists(path):
             with open(path, "wb") as f:
                 f.truncate(file_size)
+    
+    def write_log(self, message: str):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        line = f"[{timestamp}]: {message}\n"
+
+        with self.log_lock:
+            with open(self.log_file, "a") as f:
+                f.write(line)
+
 
 if __name__ == "__main__":
     PEERID = int(sys.argv[1])
