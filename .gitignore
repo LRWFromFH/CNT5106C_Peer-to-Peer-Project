@@ -1,4 +1,5 @@
-./Configs/*.cfg
+./Configs/PeerInfo.cfg
+./Configs/Common.cfg
 File backup/thefile
 File backup/tree.jpg
 VID_20251202_090546684.mp4

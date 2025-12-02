@@ -1,5 +1,15 @@
 ﻿# CNT5106C_Peer-to-Peer-Project
 
+Run with python peerProcess.py [peer id]
+File structure:
+    - CNT5106C_PEER-TO-PEER-PROJECT
+        - Configs
+            - [Peer id]
+                [File for transmission]
+            Common.cfg
+            PeerInfo.cfg
+        - peerProcess.py
+
 Division of work: (Not indicative of task difficulty)
     Alexander Martin:
         Connection Manager Class
