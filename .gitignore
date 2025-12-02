@@ -1,6 +1,7 @@
-./Configs/project_config_file_small/project_config_file_small/PeerInfo.cfg
+./Configs/PeerInfo.cfg
+./Configs/Common.cfg
 File backup/thefile
 File backup/tree.jpg
 VID_20251202_090546684.mp4
 .gitignore
-log_peer_2325.log
+log_peer_*.log
