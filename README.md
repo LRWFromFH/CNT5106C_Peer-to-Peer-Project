@@ -13,6 +13,7 @@ File structure:
         - peerProcess.py
 
 Division of work: (Not indicative of task difficulty)
+    
     Alexander Martin:
         Connection Manager Class
         Initial configuration/connections
@@ -30,3 +31,4 @@ Division of work: (Not indicative of task difficulty)
 
 Link to video:
 https://uflorida-my.sharepoint.com/:v:/g/personal/alexander_martin_ufl_edu/IQAlZRGurMsgSJpdi1iYk-7fAeeaATdouLkLdbMxmfeFkh0?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=Tz5cwi
+
