@@ -1,6 +1,8 @@
 ﻿# CNT5106C_Peer-to-Peer-Project
 
 Run with python peerProcess.py [peer id]
+You will have to provide Common.cfg and PeerInfo.cfg as outlined in the submission guidelines.
+
 File structure:
     - CNT5106C_PEER-TO-PEER-PROJECT
         - Configs
