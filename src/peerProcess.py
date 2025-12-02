@@ -870,6 +870,7 @@ class app:
                 #INFOMESSAGE(f"{peer.peerID}")
                 if(not(neededpieces == None)):
                     neededpiece = r.choice(neededpieces)
+                    self.write_log(f"Peer {self.peerid} requesting piece {neededpiece} from peer {peer.peerID}")
                     neededpiece = neededpiece.to_bytes(4, "big")
                     self.dispatchQueue.put((peer, Messages.REQUEST, neededpiece), timeout=0.1)
                 
@@ -898,6 +899,7 @@ class app:
                 #INFOMESSAGE(f"Bitfield for Peer {peer.peerID} has been set.")
             case Messages.REQUEST: #Request
                 payload = int.from_bytes(payload,"big")
+                self.write_log(f"Peer {self.peerid} received request for piece {payload} from peer {peer.peerID}")
                 self.dispatchQueue.put((peer, Messages.PIECE,payload), timeout=0.1)
                 #INFOMESSAGE("Request message received.")
             case Messages.PIECE: #Piece
@@ -923,6 +925,7 @@ class app:
                         neededpieces = self.getNeededPieces(peer)
                         if(not(neededpieces == None)):
                             neededpiece = r.choice(neededpieces)
+                            self.write_log(f"Peer {self.peerid} requesting piece {neededpiece} from peer {peer.peerID}")
                             neededpiece = neededpiece.to_bytes(4, "big")
                             self.dispatchQueue.put((peer, Messages.REQUEST, neededpiece), timeout=0.1)
                         else:
