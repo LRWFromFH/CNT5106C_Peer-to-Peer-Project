@@ -361,6 +361,7 @@ class app:
         self.bitfield = bytearray(num_bytes)
         self.full_bitfield = self.build_full_bitfield(self.FileSize, self.PieceSize)
         self.calcBitfield(self.FileName)
+        self.write_log(f"Configuration file read and variables set.")
         
     def build_full_bitfield(self, file_size: int, piece_size: int) -> bytearray:
         total_pieces = math.ceil(int(file_size) / int(piece_size))
@@ -886,6 +887,7 @@ class app:
                 #Determine Interest
                 self.dispatchQueue.put((peer, Messages.BITFIELD, None), timeout=0.1)
             case Messages.BITFIELD: #Bitfield
+                self.write_log(f"Peer {self.peerid} received the 'Bitfield' message from {peer.peerID} for handshake.")
                 peer.bitfield = bytearray(payload)
                 self.dispatchQueue.put((peer,Messages.BITFIELD, None), timeout=0.1)
                 #peer.interested = self.determineInterest(peer)
