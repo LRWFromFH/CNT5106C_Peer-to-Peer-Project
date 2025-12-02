@@ -579,10 +579,12 @@ class app:
                         NewUnchokedPeers.append(p)
                     else:
                         break
-                new_ids = [p.peerID for p in NewUnchokedPeers]
+                if NewUnchokedPeers:
+                    new_ids = [p.peerID for p in NewUnchokedPeers]
 
-                ids_str = ", ".join(str(x) for x in new_ids)
-                self.write_log(f"Peer {self.peerid} has the preferred neighbors {ids_str}.")
+                    ids_str = ", ".join(str(x) for x in new_ids)
+                    self.write_log(f"Peer {self.peerid} has the preferred neighbors {ids_str}.")
+                self.write_log(f"Peer {self.peerid} has no preferred neighbors to send to.")
             for c in self.connectedPeers:
                 if c.choked:
                     #Put choke message on dispatch queue.
@@ -616,10 +618,10 @@ class app:
             if self.OptimisticallyUnchokedPeer:
                 self.OptimisticallyUnchokedPeer.choked = True
             NewOptimisticallyUnchokedPeer = self.unchokeRandomPeer()
-            if(not(self.OptimisticallyUnchokedPeer == NewOptimisticallyUnchokedPeer) and not(self.OptimisticallyUnchokedPeer == None)):
+            if(not(self.OptimisticallyUnchokedPeer == None)):
                 self.choke(self.OptimisticallyUnchokedPeer)
-                self.OptimisticallyUnchokedPeer = NewOptimisticallyUnchokedPeer
-                self.write_log(f"Peer {self.peerid} has the optimistically unchoked neighbor {NewOptimisticallyUnchokedPeer.peerID}.")
+            self.OptimisticallyUnchokedPeer = NewOptimisticallyUnchokedPeer
+            self.write_log(f"Peer {self.peerid} has the optimistically unchoked neighbor {NewOptimisticallyUnchokedPeer.peerID}.")
 
     def unchokeRandomPeer(self, k=[]):
         ChokedPeers = self.getChokedPeers()
