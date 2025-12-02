@@ -621,7 +621,9 @@ class app:
             if(not(self.OptimisticallyUnchokedPeer == None)):
                 self.choke(self.OptimisticallyUnchokedPeer)
             self.OptimisticallyUnchokedPeer = NewOptimisticallyUnchokedPeer
-            self.write_log(f"Peer {self.peerid} has the optimistically unchoked neighbor {NewOptimisticallyUnchokedPeer.peerID}.")
+            if NewOptimisticallyUnchokedPeer:
+                self.write_log(f"Peer {self.peerid} has the optimistically unchoked neighbor {NewOptimisticallyUnchokedPeer.peerID}.")
+            self.write_log(f"Peer {self.peerid} has no peers to optimistically unchoke.")
 
     def unchokeRandomPeer(self, k=[]):
         ChokedPeers = self.getChokedPeers()
