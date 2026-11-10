@@ -6,3 +6,4 @@ VID_20251202_090546684.mp4
 .gitignore
 log_peer_*.log
 Configs/*/tree.jpg
+./testfile.txt
